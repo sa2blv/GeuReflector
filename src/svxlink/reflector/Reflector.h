@@ -452,7 +452,7 @@ class Reflector : public sigc::trackable
     std::string                 m_accept_cert_email;
     Json::Value                 m_status;
     std::string                 reflektor_trunk_id = "";
-
+    std::map<std::string, std::vector<MsgPeerNodeList::NodeEntry>> m_peer_nodes_map;
 
     std::vector<TrunkLink*>     m_trunk_links;
     // Prefix bookkeeping for owner-relay decisions. m_local_prefixes holds
