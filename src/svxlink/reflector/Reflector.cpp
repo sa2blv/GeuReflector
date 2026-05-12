@@ -376,6 +376,8 @@ bool Reflector::initialize(Async::Config &cfg)
   m_cfg = &cfg;
   TGHandler::instance()->setConfig(m_cfg);
   ReflectorTrunkManager::instance()->setConfig(m_cfg);
+  ReflectorTrunkManager::instance()->init();
+
 
   ReflectorTrunkManager::instance()->init();
 
