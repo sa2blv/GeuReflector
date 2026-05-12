@@ -5963,7 +5963,7 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
   }
 
    onPeerNodeList(addr.toString(), sanitized);
-   peer_nodes[addr.toString()] = sanitized;
+   m_peer_nodes_map[addr.toString()] = sanitized;
     
     }
 
