@@ -1260,6 +1260,33 @@ std::vector<std::string> ReflectorTrunkManager::list_peer_host()
 }
 
 
+void ReflectorTrunkManager::sendNodeList_geu(const std::vector<MsgPeerNodeList::NodeEntry>& nodes)
+{
+    MsgPeerNodeList  msg = MsgPeerNodeList(nodes);
+
+    ReflectorUdpMsgV2 header(msg.type(), 0,
+        0 & 0xffff);
+
+    ostringstream ss;
+    assert(header.pack(ss) && msg.pack(ss));
+
+    for (auto& peer : peers)
+    {
+
+        if (peer.Crypt_key != "")
+        {
+            peer.client->sendUdp_crypt(ss.str().data(), ss.str().size(), peer.Crypt_key);
+        }
+        else
+        {
+            peer.client->sendUdp(ss.str().data(), ss.str().size());
+        }
+
+    }
+    return;
+}
+
+
 
 
 

@@ -213,6 +213,90 @@ std::string generateClientId(int length = 8)
 };
 
 
+
+// Strip control chars (< 0x20 and 0x7f) and ':' (Redis key delimiter),
+// then truncate to `max_len`. Used for untrusted identifiers received
+// over the trunk: peer_id from hellos and callsigns from node lists.
+static std::string sanitizeIdent(const std::string& in, size_t max_len)
+{
+  std::string out;
+  out.reserve(std::min(in.size(), max_len));
+  for (char c : in)
+  {
+    unsigned char u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u == 0x7f) continue;
+    if (c == ':') continue;
+    out += c;
+    if (out.size() >= max_len) break;
+  }
+  return out;
+}
+
+// Strip control chars only and truncate to `max_bytes`. Used for free-
+// form text fields (e.g. QTH name) where non-ASCII bytes (UTF-8) are
+// legitimate. Truncation is byte-level; callers tolerate the possibility
+// of a split UTF-8 sequence at the boundary.
+static std::string sanitizeText(const std::string& in, size_t max_bytes)
+{
+  std::string out;
+  out.reserve(std::min(in.size(), max_bytes));
+  for (char c : in)
+  {
+    unsigned char u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u == 0x7f) continue;
+    out += c;
+    if (out.size() >= max_bytes) break;
+  }
+  return out;
+}
+
+// Recursively sanitize string values inside an untrusted JSON tree
+// received from a peer. Caps depth, container size, and per-string
+// length. Mutates in place.
+static void sanitizeJsonStrings(Json::Value& v, unsigned depth = 0)
+{
+  static constexpr unsigned MAX_DEPTH       = 8;
+  static constexpr Json::ArrayIndex MAX_LEN = 256;
+  static constexpr size_t MAX_STR_BYTES     = 1024;
+  if (depth >= MAX_DEPTH)
+  {
+    v = Json::Value();  // null out the subtree
+    return;
+  }
+  if (v.isString())
+  {
+    v = sanitizeText(v.asString(), MAX_STR_BYTES);
+  }
+  else if (v.isArray())
+  {
+    if (v.size() > MAX_LEN) v.resize(MAX_LEN);
+    for (Json::ArrayIndex i = 0; i < v.size(); ++i)
+    {
+      sanitizeJsonStrings(v[i], depth + 1);
+    }
+  }
+  else if (v.isObject())
+  {
+    auto names = v.getMemberNames();
+    if (names.size() > MAX_LEN)
+    {
+      // Trim deterministically by removing trailing keys.
+      for (size_t i = MAX_LEN; i < names.size(); ++i)
+      {
+        v.removeMember(names[i]);
+      }
+      names.resize(MAX_LEN);
+    }
+    for (const auto& k : names)
+    {
+      sanitizeJsonStrings(v[k], depth + 1);
+    }
+  }
+}
+
+
+
+
 /****************************************************************************
  *
  * Exported Global Variables
@@ -3994,6 +4078,9 @@ void Reflector::sendNodeListToAllPeers(void)
   {
     m_mqtt->publishLocalNodes(local_nodes);
   }
+  
+  ReflectorTrunkManager::instance()->sendNodeList_geu(combined);
+  
 } /* Reflector::sendNodeListToAllPeers */
 
 
@@ -5804,6 +5891,67 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
 
     }
+    if (header_v2a.type() == MsgPeerNodeList::TYPE)
+    {
+      MsgPeerNodeList msg;
+  if (!msg.unpack(ss))
+  {
+    geulog::error("trunk", "[trunk] Failed to unpack MsgPeerNodeList");
+    return;
+  }
+
+  // Sanitize every entry before handing off. Untrusted strings from peer
+  // reflectors flow into Redis key names, MQTT payloads and log output;
+  // keep them byte-bounded and free of control / delimiter characters.
+  std::vector<MsgPeerNodeList::NodeEntry> sanitized;
+  sanitized.reserve(msg.nodes().size());
+  unsigned dropped = 0;
+  for (const auto& n : msg.nodes())
+  {
+    MsgPeerNodeList::NodeEntry e;
+    e.callsign = sanitizeIdent(n.callsign, 32);
+    if (e.callsign.empty())
+    {
+      ++dropped;
+      continue;
+    }
+    e.tg       = n.tg;
+    e.qth_name = sanitizeText(n.qth_name, 64);
+
+    // Lat/lon: reject non-finite; drop out-of-range values by zeroing
+    // them (keep the callsign, lose the coordinates). Downstream consumers
+    // already treat (0,0) as "no location".
+    if (std::isfinite(n.lat) && std::isfinite(n.lon) &&
+        n.lat >= -90.0f && n.lat <= 90.0f &&
+        n.lon >= -180.0f && n.lon <= 180.0f)
+    {
+      e.lat = n.lat;
+      e.lon = n.lon;
+    }
+    else
+    {
+      e.lat = 0.0f;
+      e.lon = 0.0f;
+    }
+    e.status = n.status;
+    sanitizeJsonStrings(e.status);
+    // Recipient-relative sat_id from the peer. Pass through as-is after
+    // bounded sanitisation: empty = "on the peer itself", non-empty =
+    // "on a satellite attached to the peer".
+    e.sat_id = sanitizeIdent(n.sat_id, 64);
+    sanitized.push_back(std::move(e));
+  }
+  if (dropped > 0)
+  {
+    geulog::warn("trunk", " dropped ", dropped,
+                 " node list entrie(s) with empty/invalid callsign after sanitization");
+  }
+
+  onPeerNodeList(addr.toString(), sanitized);
+
+  
+    
+    }
 
 
 
@@ -5965,8 +6113,6 @@ void Reflector::broadcastUdpMsg_BLV_TRUNK(const MsgUdpAudio& msg, int tg, std::s
     msg_trunk.tg = tg;
     ReflectorTrunkManager::instance()->handleOutgoingAudio_width_remap_tg_send(tg, msg_trunk, tg_send);
 } /* Reflector::broadcastUdpMsg */
-
-
 
 
 

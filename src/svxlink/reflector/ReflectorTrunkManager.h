@@ -246,6 +246,7 @@ public:
         return "";  // eller throw exception
     }
 
+    void sendNodeList_geu(const std::vector<MsgPeerNodeList::NodeEntry>& nodes);
 
 
 
