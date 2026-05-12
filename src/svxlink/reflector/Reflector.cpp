@@ -4024,6 +4024,7 @@ void Reflector::sendNodeListToAllPeers(void)
     local_nodes.push_back(e);
   }
   
+      std::vector<MsgPeerNodeList::NodeEntry> combined_udp = local_nodes;
   
     for (const auto& peer_kv : m_peer_nodes_map)
     {
@@ -4037,10 +4038,12 @@ void Reflector::sendNodeListToAllPeers(void)
   // 2. Combined view = local + every connected satellite's stamped roster.
   // Each sat-supplied entry already carries sat_id == its satelliteId.
   std::vector<MsgPeerNodeList::NodeEntry> combined = local_nodes;
+
   for (const auto& kv : m_satellite_con_map)
   {
     const auto& sat_nodes = kv.second->partnerNodes();
     combined.insert(combined.end(), sat_nodes.begin(), sat_nodes.end());
+    combined_udp.insert(combined.end(), sat_nodes.begin(), sat_nodes.end());
   }
 
   // 3. Trunks and twin: full combined view. Trunk peers and twin partners
@@ -4090,7 +4093,7 @@ void Reflector::sendNodeListToAllPeers(void)
     m_mqtt->publishLocalNodes(local_nodes);
   }
   
-  ReflectorTrunkManager::instance()->sendNodeList_geu(combined);
+  ReflectorTrunkManager::instance()->sendNodeList_geu(combined_udp);
   
 } /* Reflector::sendNodeListToAllPeers */
 
@@ -4128,19 +4131,8 @@ void Reflector::onPeerNodeList(const std::string& peer_id,
     }
     prev = std::move(seen);
   }
-  m_peer_nodes_map[peer_id] = nodes;
+
   
-    // Debug: Skriv ut hela m_peer_nodes_map
-  geulog::info("trunk", "=== m_peer_nodes_map ===");
-  for (const auto& [map_peer_id, map_nodes] : m_peer_nodes_map)
-  {
-    geulog::info("trunk", "Peer: ", map_peer_id, " -> ", map_nodes.size(), " nodes");
-    for (const auto& n : map_nodes)
-    {
-      geulog::info("trunk", "  - ", n.callsign, " (TG:", n.tg, ")");
-    }
-  }
-  geulog::info("trunk", "=== End m_peer_nodes_map ===");
   
 } /* Reflector::onPeerNodeList */
 
@@ -5971,7 +5963,7 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
   }
 
    onPeerNodeList(addr.toString(), sanitized);
-
+   peer_nodes[addr.toString()] = sanitized;
     
     }
 
