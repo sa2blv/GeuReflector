@@ -4024,7 +4024,15 @@ void Reflector::sendNodeListToAllPeers(void)
     local_nodes.push_back(e);
   }
   
- 
+  
+    for (const auto& peer_kv : m_peer_nodes_map)
+    {
+      const auto& peer_nodes = peer_kv.second;
+      local_nodes.insert(local_nodes.end(), 
+                        peer_nodes.begin(), 
+                        peer_nodes.end());
+    }
+    
 
   // 2. Combined view = local + every connected satellite's stamped roster.
   // Each sat-supplied entry already carries sat_id == its satelliteId.
@@ -5656,8 +5664,6 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
             // GEU Refletor send_to trunks;
 
             std::string trunk_type = ReflectorTrunkManager::instance()->get_trunk_type(addr.toString());
-            sendNodeListToAllPeers();
-
 
             // GEU Refletor send_to trunks;
             for (auto* link : m_trunk_links)
