@@ -1630,7 +1630,7 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
                     ReflectorClient::mkAndFilter(
                       ReflectorClient::TgMonitorFilter(tg),
                       ReflectorClient::mkAndFilter(
-                        ReflectorClient::PassiveObserverFilter(),
+                        ReflectorClient::SelectedTgIdleFilter(),
                         ReflectorClient::EarliestMonitorTalkerFilter(tg))))));
 
             // Send packet to BLV trunk
@@ -1816,7 +1816,7 @@ void Reflector::onTalkerUpdated(uint32_t tg, ReflectorClient* old_talker,
               ReflectorClient::mkAndFilter(
                 ReflectorClient::TgMonitorFilter(tg),
                 ReflectorClient::mkAndFilter(
-                  ReflectorClient::PassiveObserverFilter(),
+                  ReflectorClient::SelectedTgIdleFilter(),
                   ReflectorClient::EarliestMonitorTalkerFilter(tg)))),
             ReflectorClient::ExceptFilter(old_talker)));
     if (m_mqtt != nullptr)
@@ -3286,13 +3286,15 @@ void Reflector::onTrunkTalkerUpdated(uint32_t tg,
           ReflectorClient::mkAndFilter(
             ReflectorClient::TgMonitorFilter(tg),
             ReflectorClient::mkAndFilter(
-              ReflectorClient::PassiveObserverFilter(),
+              ReflectorClient::SelectedTgIdleFilter(),
               ReflectorClient::EarliestMonitorTalkerFilter(tg)))));
               
          // Sent to blv ReflectorTrunkManager 
         msg_trunk1.talker_status = 1;
         msg_trunk1.tg = tg;
-        msg_trunk1.talker = old_cs;             
+        msg_trunk1.talker = old_cs;        
+        ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(tg, msg_trunk1);
+     
               
               
     if (m_mqtt != nullptr)
