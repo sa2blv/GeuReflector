@@ -4024,15 +4024,7 @@ void Reflector::sendNodeListToAllPeers(void)
     local_nodes.push_back(e);
   }
   
-  
-    for (const auto& peer_kv : m_peer_nodes_map)
-    {
-      const auto& peer_nodes = peer_kv.second;
-      local_nodes.insert(local_nodes.end(), 
-                        peer_nodes.begin(), 
-                        peer_nodes.end());
-    }
-    
+ 
 
   // 2. Combined view = local + every connected satellite's stamped roster.
   // Each sat-supplied entry already carries sat_id == its satelliteId.
@@ -4128,6 +4120,20 @@ void Reflector::onPeerNodeList(const std::string& peer_id,
     }
     prev = std::move(seen);
   }
+  m_peer_nodes_map[peer_id] = nodes;
+  
+    // Debug: Skriv ut hela m_peer_nodes_map
+  geulog::info("trunk", "=== m_peer_nodes_map ===");
+  for (const auto& [map_peer_id, map_nodes] : m_peer_nodes_map)
+  {
+    geulog::info("trunk", "Peer: ", map_peer_id, " -> ", map_nodes.size(), " nodes");
+    for (const auto& n : map_nodes)
+    {
+      geulog::info("trunk", "  - ", n.callsign, " (TG:", n.tg, ")");
+    }
+  }
+  geulog::info("trunk", "=== End m_peer_nodes_map ===");
+  
 } /* Reflector::onPeerNodeList */
 
 
@@ -5958,9 +5964,8 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
                  " node list entrie(s) with empty/invalid callsign after sanitization");
   }
 
-  onPeerNodeList(addr.toString(), sanitized);
-  m_peer_nodes_map[addr.toString()] = sanitized;
-  
+   onPeerNodeList(addr.toString(), sanitized);
+
     
     }
 
