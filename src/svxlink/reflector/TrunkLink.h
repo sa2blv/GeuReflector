@@ -188,6 +188,11 @@ class TrunkLink : public sigc::trackable
     void reloadConfig(void);
     // One-line summary for TRUNK STATUS
     std::string statusLine(void) const;
+    
+            // BLV trunk TYPE 
+    std::string get_trunk_type();
+    std::string get_trunk_type_send();
+
 
   private:
     static const unsigned HEARTBEAT_TX_CNT_RESET = 10;
@@ -258,7 +263,10 @@ class TrunkLink : public sigc::trackable
     bool                m_ib_hello_received = false;
     unsigned            m_ib_hb_tx_cnt = 0;
     unsigned            m_ib_hb_rx_cnt = 0;
-
+    std::string         Trunk_type;
+    std::string         Trunk_type_send;
+    
+    
     TrunkLink(const TrunkLink&);
     TrunkLink& operator=(const TrunkLink&);
 
@@ -346,6 +354,7 @@ class TrunkLink : public sigc::trackable
       unsigned hb_rx_cnt      = 0;
     };
     std::vector<PairedInboundState> m_ib_states;  // parallel to m_ib_cons
+    
 
 };  /* class TrunkLink */
 

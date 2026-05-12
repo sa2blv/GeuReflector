@@ -71,6 +71,10 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include "SatelliteLink.h"
 #include "SatelliteClient.h"
 #include "MqttPublisher.h"
+#include "routing_table.hpp"
+#include "ReflectorTrunkManager.h"
+ 
+
 
 
 /****************************************************************************
@@ -378,6 +382,10 @@ class Reflector : public sigc::trackable
                              const std::string& direction, bool up,
                              const std::string& host = "",
                              uint16_t port = 0);
+                             
+    void trunk_magager_talker_start_stop(int tg, std::string callsign, int start_stop);
+    void broadcastUdpMsg_BLV_TRUNK(const MsgUdpAudio& msg, int tg,std::string tg_send);
+
 
     // Triggered when a local client logs in/out or changes TG. Schedules
     // a debounced node-list emission to all trunk peers and to MQTT.
@@ -414,6 +422,7 @@ class Reflector : public sigc::trackable
 
     FramedTcpServer*            m_srv;
     Async::EncryptedUdpSocket*  m_udp_sock;
+    Async::UdpSocket* 	         trunk_sock;
     ReflectorClientConMap       m_client_con_map;
     Async::Config*              m_cfg;
     uint32_t                    m_tg_for_v1_clients;
@@ -442,6 +451,8 @@ class Reflector : public sigc::trackable
     std::vector<uint8_t>        m_ca_sig;
     std::string                 m_accept_cert_email;
     Json::Value                 m_status;
+    std::string                 reflektor_trunk_id = "";
+
 
     std::vector<TrunkLink*>     m_trunk_links;
     // Prefix bookkeeping for owner-relay decisions. m_local_prefixes holds
@@ -457,6 +468,11 @@ class Reflector : public sigc::trackable
     std::set<uint32_t>          m_cluster_tgs;
     Async::Timer                m_nodelist_timer;
     static const size_t TRUNK_MAX_PENDING_CONS = 5;
+    Json::Value                 m_lastConfig;
+
+    
+    void print_entry(const RoutingEntry& e);
+    void add_to_routing_table(std::string trunk, std::string callsign, int tg);
 
     FramedTcpServer*            m_trunk_srv = nullptr;
     // Inbound trunk connections waiting for MsgPeerHello identification
@@ -570,6 +586,39 @@ class Reflector : public sigc::trackable
     std::vector<CertInfo> getAllCerts(void);
     std::vector<CertInfo> getAllPendingCSRs(void);
     std::string formatCerts(bool signedCerts=true, bool pendingCerts=true);
+    
+    
+        std::unique_ptr<ReflectorTrunkManager> trunkMgr;  // trunk 
+
+    void on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port,void *buf, int count);
+    void broadcastMsg_from_trunk(const ReflectorUdpMsg& msg);
+    std::vector<int> previousTGs_to_message;
+    void handleTrunkPtyCmd(const std::string& cmd);
+
+    Async::Timer* timer_heartbeat_trunk;
+    Async::Timer* timer_brodcast_trunk;
+    Async::Timer* timmer_send_intresstedtg;
+    void send_heartbeat_trunk(Timer* t);
+
+    void Brodcast_list_to_peer_routing(void);
+    void Brodcast_list_to_peer_routing_T(Timer* t);
+    RoutingTable node_table;
+    void Geu_status(void);
+    
+    void Process_New_Config_update(const Json::Value& config);
+    void DetectAndApplySectionDiff(
+        const std::string& sectionName,
+        const Json::Value& oldSection,
+        const Json::Value& newSection);
+    void ApplySpecialSectionLogic(
+        const std::string& sectionName,
+        const std::string& keyName);
+    void SaveConfigToFile(const Json::Value& persistentConfig);
+    void send_trunk_tg_filter_message();
+
+    
+    
+    
 };  /* class Reflector */
 
 

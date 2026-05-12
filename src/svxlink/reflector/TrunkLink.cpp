@@ -344,6 +344,19 @@ bool TrunkLink::initialize(void)
       geulog::info("trunk", m_section, ": Allowed TGs: ",
                    m_allow_filter.toString());
   }
+  
+      std::string trunk_type_lo = "A";
+    if (m_cfg.getValue(m_section, "TrunkType", trunk_type_lo))
+
+        Trunk_type = trunk_type_lo;
+
+
+    std::string Trunk_type_send1 = "";
+
+    if (m_cfg.getValue(m_section, "TrunkTypeSend", Trunk_type_send1))
+        Trunk_type_send = Trunk_type_send1;
+        
+        
 
   // TG_MAP — bidirectional TG remap, syntax "peer:local,peer2:local2"
   std::string tgmap_str;
@@ -541,6 +554,11 @@ Json::Value TrunkLink::statusJson(void) const
   Json::Value remote_arr(Json::arrayValue);
   for (const auto& p : m_remote_prefix) remote_arr.append(p);
   obj["remote_prefix"] = remote_arr;
+  
+  // BLV monitor
+  obj["trunkType"] = Trunk_type;
+  obj["trunkTypeSend"] = Trunk_type_send;
+    
 
   // active_talkers: per-peer active TGs (already post-TG_MAP remap).
   // We use m_peer_active_tgs directly instead of filtering the global
@@ -1167,6 +1185,9 @@ void TrunkLink::handleMsgPeerAudio(std::istream& is)
             ReflectorClient::PassiveObserverFilter(),
             ReflectorClient::EarliestMonitorTalkerFilter(local_tg)))));
 
+  // Resend to BLV sub trunk
+  m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, local_tg, Trunk_type_send);
+    
   // Forward trunk audio to connected satellites
   m_reflector->forwardAudioToSatellitesExcept(nullptr, local_tg, msg.audio());
 
@@ -2075,6 +2096,21 @@ std::string TrunkLink::statusLine(void) const
     << (m_tg_map_in.empty()        ? "" : " [tg_map]");
   return s.str();
 } /* TrunkLink::statusLine */
+
+std::string TrunkLink::get_trunk_type()
+{
+
+    return Trunk_type;
+}
+
+
+std::string TrunkLink::get_trunk_type_send()
+{
+
+    return Trunk_type_send;
+}
+
+
 
 
 /*

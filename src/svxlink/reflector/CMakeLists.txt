@@ -3,6 +3,8 @@ find_package(Popt REQUIRED)
 set(LIBS ${LIBS} ${POPT_LIBRARIES})
 include_directories(${POPT_INCLUDE_DIRS})
 add_definitions(${POPT_DEFINITIONS})
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find the GCrypt library
 #find_package(GCrypt REQUIRED)
@@ -18,6 +20,11 @@ add_definitions(${POPT_DEFINITIONS})
 pkg_check_modules (JSONCPP REQUIRED jsoncpp)
 include_directories(${JSONCPP_INCLUDE_DIRS})
 set(LIBS ${LIBS} ${JSONCPP_LIBRARIES})
+
+
+find_package(CURL REQUIRED)
+set(LIBS ${LIBS} curl)
+
 
 # Optional MQTT publishing — pass -DWITH_MQTT=OFF to build without
 # libmosquitto. Call sites keep working through a no-op stub class
@@ -55,6 +62,7 @@ set(REFLECTOR_SOURCES
   svxreflector.cpp Reflector.cpp ReflectorClient.cpp TGHandler.cpp TrunkLink.cpp
   TwinLink.cpp
   SatelliteLink.cpp SatelliteClient.cpp
+  ReflectorTrunkManager.cpp ReflectorClientUdp.cpp ExternaConfigFetcher.cpp 
 )
 if(WITH_MQTT)
   list(APPEND REFLECTOR_SOURCES MqttPublisher.cpp)

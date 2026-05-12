@@ -2145,6 +2145,158 @@ class MsgPeerTgInterest : public ReflectorMsgBase<129>
 }; /* MsgPeerTgInterest */
 
 
+/**
+@brief   A namespace for stautsmessages
+@author  Peter Lundberg /SA2BLV
+@date    2026-01-10
+
+This is the message used to transmit audio to the other side of trunk.
+*/
+
+class MsgUdpAudio_trunk : public ReflectorUdpMsgBase<101>
+{
+  public:
+    MsgUdpAudio_trunk(void) {}
+    MsgUdpAudio_trunk(const std::vector<uint8_t>& audio_data)
+      : m_audio_data(audio_data) {}
+    MsgUdpAudio_trunk(const void *buf, int count)
+    {
+      if (count > 0)
+      {
+        const uint8_t *bbuf = reinterpret_cast<const uint8_t*>(buf);
+        m_audio_data.assign(bbuf, bbuf+count);
+      }
+    }
+    std::vector<uint8_t>& audioData(void) { return m_audio_data; }
+    const std::vector<uint8_t>& audioData(void) const { return m_audio_data; }
+
+  //  ASYNC_MSG_MEMBERS(m_audio_data, tg,Talker,ttl)
+     ASYNC_MSG_MEMBERS(m_audio_data, tg,Talker)
+
+    int tg =0;
+    std::string Talker;
+    int ttl = 10;
+  private:
+    std::vector<uint8_t> m_audio_data;
+
+   
+}; /* MsgUdpAudio_trunk */
+
+
+/**
+@brief   A namespace for stautsmessages
+@author  Peter Lundberg /SA2BLV
+@date    2026-01-10
+
+This namespace hold some constants, types and classes that are used when
+forming ciphered UDP datagrams.
+*/
+
+class MSG_Trunk_Change : public ReflectorMsgBase<140>
+{
+
+ public:    
+    int talker_status =0;
+    int qsy=0;
+    int tg =0;
+    int new_tg =0;
+    std::string talker;
+    int ttl = 10;
+   
+//    ASYNC_MSG_MEMBERS(talker_status,qsy,tg,new_tg,talker,ttl);
+      ASYNC_MSG_MEMBERS(talker_status, qsy, tg, new_tg, talker);
+  private:
+ 
+}; /* class MSG_Trunk_Change */
+
+/**
+@brief   A namespace for to tell the other sid what talkgroups i want to listen to 
+It is nedded on smaler/ Local reflektors to save  on trafic 
+@author  Peter Lundberg /SA2BLV
+@date    2026-01-10
+
+This namespace hold some constants, types and classes that are used when
+forming ciphered UDP datagrams.
+*/
+class MSG_Trunk_tg_subsribe : public ReflectorMsgBase<131>
+{
+public:
+    std::string trunkid; // Ipadress of the trunk
+    std::vector<int> Talkgroups;   // <-- list of ints
+    int ttl = 10;
+
+    //ASYNC_MSG_MEMBERS(trunkid,Talkgroups,ttl);
+    ASYNC_MSG_MEMBERS(trunkid, Talkgroups);
+};
+/**
+@brief   A namespace for to tell the other sid what talkgroups i want to listen to
+It is nedded on smaler/ Local reflektors to save  on trafic
+@author  Peter Lundberg /SA2BLV
+@date    2026-04-04
+
+This namespace hold some constants, types and classes that are used when
+forming ciphered UDP datagrams.
+*/
+class MSG_Trunk_tg_Heart_beat : public ReflectorMsgBase<132>
+{
+public:
+    std::string trunkid; // Ipadress of the trunk
+    int status = 0; // 1 == sent , 2 = reply
+    int nr = 0; // 1 == sent , 2 = reply
+    int ttl = 10;
+   
+ //   ASYNC_MSG_MEMBERS(trunkid, status,nr,ttl);
+      ASYNC_MSG_MEMBERS(trunkid, status, nr);
+};
+
+
+class MsgTrunkNodeListBrodcast : public ReflectorMsgBase<133>
+{
+public:
+    struct NodeEntry
+    {
+        std::string      callsign;
+        uint32_t         tg = 0;
+        std::vector<int> monitored_tgs;
+    };
+
+    MsgTrunkNodeListBrodcast(void) {}
+
+    explicit MsgTrunkNodeListBrodcast(const std::vector<NodeEntry>& nodes)
+    {
+        for (const auto& n : nodes)
+        {
+            m_callsigns.push_back(n.callsign);
+            m_tgs.push_back(n.tg);
+            m_monitored_tgs.push_back(n.monitored_tgs);
+        }
+    }
+
+    std::vector<NodeEntry> nodes(void) const
+    {
+        std::vector<NodeEntry> result;
+        size_t sz = std::min(m_callsigns.size(), std::min(m_tgs.size(), m_monitored_tgs.size()));
+        for (size_t i = 0; i < sz; ++i)
+        {
+            NodeEntry e;
+            e.callsign = m_callsigns[i];
+            e.tg = m_tgs[i];
+            e.monitored_tgs = m_monitored_tgs[i];
+            result.push_back(e);
+        }
+        return result;
+    }
+
+    ASYNC_MSG_MEMBERS(m_callsigns, m_tgs, m_monitored_tgs)
+
+private:
+    std::vector<std::string>           m_callsigns;
+    std::vector<uint32_t>              m_tgs;
+    std::vector<std::vector<int>>      m_monitored_tgs;  // one list per node
+
+}; /* MsgTrunkNodeListBrodcast */
+
+
 #endif /* REFLECTOR_MSG_INCLUDED */
 
 
