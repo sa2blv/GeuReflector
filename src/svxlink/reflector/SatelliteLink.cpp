@@ -87,9 +87,8 @@ void sanitizeJsonStrings(Json::Value& v, unsigned depth = 0)
 
 
 SatelliteLink::SatelliteLink(Reflector* reflector,
-                             Async::FramedTcpConnection* con,
-                             const std::string& secret)
-  : m_reflector(reflector), m_con(con), m_secret(secret),
+                             Async::FramedTcpConnection* con)
+  : m_reflector(reflector), m_con(con),
     m_hello_received(false),
     m_heartbeat_timer(1000, Timer::TYPE_PERIODIC),
     m_hb_tx_cnt(HEARTBEAT_TX_CNT_RESET),
@@ -299,25 +298,40 @@ void SatelliteLink::handleMsgPeerHello(std::istream& is)
     return;
   }
 
-  if (!msg.verify(m_secret))
+  std::string secret;
+  bool pinned = false;
+  if (!m_reflector->resolveSatelliteSecret(msg.id(), secret, pinned))
   {
-    geulog::error("satellite", "Authentication failed for satellite '",
-                  msg.id(), "'");
+    geulog::error("satellite",
+                  "No secret configured to authenticate satellite '",
+                  msg.id(), "' (no SECRET_<id>= match and no fallback "
+                  "SECRET=) — rejecting");
     m_con->disconnect();
     return;
   }
 
-  m_satellite_id = msg.id();
-  m_hello_received = true;
+  if (!msg.verify(secret))
+  {
+    geulog::error("satellite",
+                  "Authentication failed for satellite '", msg.id(),
+                  "' (pinned=", (pinned ? "true" : "false"), ")");
+    m_con->disconnect();
+    return;
+  }
 
-  geulog::info("satellite", "Satellite '", m_satellite_id, "' authenticated");
+  m_resolved_secret = secret;
+  m_satellite_id    = msg.id();
+  m_hello_received  = true;
+
+  geulog::info("satellite", "Satellite '", m_satellite_id,
+               "' authenticated (pinned=", (pinned ? "true" : "false"), ")");
 
   // Send hello reply so the satellite client can set m_hello_received
-  // and start forwarding local events.  This also generates early
+  // and start forwarding local events. This also generates early
   // parent→satellite traffic, keeping the connection alive through
   // firewalls / NAT devices that drop idle TCP sessions.
-  sendMsg(MsgPeerHello("PARENT", "", 0, m_secret,
-                         MsgPeerHello::ROLE_PEER));
+  sendMsg(MsgPeerHello("PARENT", "", 0, m_resolved_secret,
+                       MsgPeerHello::ROLE_PEER));
 
   // Bring the new satellite up to speed: schedule a debounced node-list
   // emission so it receives the parent's combined view (parent-local

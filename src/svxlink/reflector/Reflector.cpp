@@ -2785,7 +2785,7 @@ void Reflector::satelliteConnected(Async::FramedTcpConnection* con)
 {
   geulog::info("satellite", "SAT: Inbound connection from ",
             con->remoteHost(), ":", con->remotePort());
-  auto* link = new SatelliteLink(this, con, m_satellite_secret);
+  auto* link = new SatelliteLink(this, con);
   link->linkFailed.connect(
       sigc::mem_fun(*this, &Reflector::onSatelliteLinkFailed));
   link->statusChanged.connect(

@@ -26,8 +26,7 @@ The parent always wins talker arbitration over satellites.
 class SatelliteLink : public sigc::trackable
 {
   public:
-    SatelliteLink(Reflector* reflector, Async::FramedTcpConnection* con,
-                  const std::string& secret);
+    SatelliteLink(Reflector* reflector, Async::FramedTcpConnection* con);
     ~SatelliteLink(void);
 
     bool isAuthenticated(void) const { return m_hello_received; }
@@ -91,7 +90,7 @@ class SatelliteLink : public sigc::trackable
 
     Reflector*                  m_reflector;
     Async::FramedTcpConnection* m_con;
-    std::string                 m_secret;
+    std::string                 m_resolved_secret;  // set in handleMsgPeerHello
     std::string                 m_satellite_id;
     bool                        m_hello_received;
     Async::Timer                m_heartbeat_timer;
