@@ -13,6 +13,7 @@ docs/superpowers/specs/2026-05-16-per-satellite-secrets-design.md §4:
      docker logs).
 """
 
+import os
 import struct
 import time
 import unittest
@@ -23,9 +24,12 @@ from test_trunk import (
     HOST,
     SAT_SECRET,
     SatellitePeer,
+    ROLE_SATELLITE,
+    build_trunk_hello,
     get_status,
     _http,
     recv_frame,
+    send_frame,
     wait_until,
 )
 
@@ -63,14 +67,24 @@ class SatelliteSecretsTest(unittest.TestCase):
 
     # 2. Per-id mismatch rejects (does NOT fall back to default SECRET).
     def test_pinned_id_with_wrong_secret_rejects(self):
+        """Pinned id presented with default (wrong-for-this-id) secret is rejected.
+
+        Sends the hello frame raw rather than via SatellitePeer.handshake(),
+        because handshake() blocks on recv_msg() for the parent's reply and
+        the parent closes the socket on auth failure — meaning the rejection
+        raises inside handshake() rather than on a subsequent recv_frame.
+        """
         peer = SatellitePeer()
         peer.connect_satellite()
-        # Try the default secret while presenting the pinned id — must fail.
-        peer.handshake(sat_id=T.SATELLITE_PINNED_ID, secret=SAT_SECRET)
-        peer.sock.settimeout(3.0)
+        priority = struct.unpack("!I", os.urandom(4))[0]
+        hello = build_trunk_hello(T.SATELLITE_PINNED_ID, "", priority,
+                                  SAT_SECRET, role=ROLE_SATELLITE)
+        send_frame(peer.sock, hello)
+        peer.sock.settimeout(5.0)
         with self.assertRaises((ConnectionError, OSError, struct.error)):
             recv_frame(peer.sock)
         peer.close()
+        # Confirm /status never marked the pinned id authenticated.
         time.sleep(0.5)
         self.assertFalse(
             _sat_authenticated_in_status(T.SATELLITE_PINNED_ID),
