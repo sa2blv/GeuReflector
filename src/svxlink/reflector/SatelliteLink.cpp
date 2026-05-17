@@ -90,7 +90,11 @@ SatelliteLink::SatelliteLink(Reflector* reflector,
                              Async::FramedTcpConnection* con)
   : m_reflector(reflector), m_con(con),
     m_hello_received(false),
-    m_heartbeat_timer(1000, Timer::TYPE_PERIODIC),
+    // Heartbeat starts disabled; handleMsgPeerHello turns it on after
+    // successful authentication (mirrors TrunkLink). If a hello is
+    // rejected the timer never ticks, so it cannot try to write to a
+    // socket that m_con->disconnect() has already closed.
+    m_heartbeat_timer(1000, Timer::TYPE_PERIODIC, false),
     m_hb_tx_cnt(HEARTBEAT_TX_CNT_RESET),
     m_hb_rx_cnt(HEARTBEAT_RX_CNT_RESET)
 {
@@ -287,6 +291,7 @@ void SatelliteLink::handleMsgPeerHello(std::istream& is)
   {
     geulog::error("satellite", "Satellite sent empty ID");
     m_con->disconnect();
+    linkFailed(this);
     return;
   }
 
@@ -295,6 +300,7 @@ void SatelliteLink::handleMsgPeerHello(std::istream& is)
     geulog::error("satellite", "Expected ROLE_SATELLITE from '", msg.id(),
                   "' but got role=", (int)msg.role());
     m_con->disconnect();
+    linkFailed(this);
     return;
   }
 
@@ -307,6 +313,7 @@ void SatelliteLink::handleMsgPeerHello(std::istream& is)
                   msg.id(), "' (no SECRET_<id>= match and no fallback "
                   "SECRET=) — rejecting");
     m_con->disconnect();
+    linkFailed(this);
     return;
   }
 
@@ -316,12 +323,18 @@ void SatelliteLink::handleMsgPeerHello(std::istream& is)
                   "Authentication failed for satellite '", msg.id(),
                   "' (pinned=", (pinned ? "true" : "false"), ")");
     m_con->disconnect();
+    linkFailed(this);
     return;
   }
 
   m_resolved_secret = secret;
   m_satellite_id    = msg.id();
   m_hello_received  = true;
+  // Now that we're authenticated, start ticking the heartbeat. The
+  // timer is constructed disabled (see ctor) so that a rejected hello
+  // cannot leave it ticking against a socket m_con->disconnect() has
+  // already closed.
+  m_heartbeat_timer.setEnable(true);
 
   geulog::info("satellite", "Satellite '", m_satellite_id,
                "' authenticated (pinned=", (pinned ? "true" : "false"), ")");

@@ -102,7 +102,29 @@ class SatelliteSecretsTest(unittest.TestCase):
         finally:
             sat.close()
 
-    # 4. Malformed SECRET_<bad.id>= is ignored at startup; the id still
+    # 4. Regression: a rejected hello must not leave a SatelliteLink whose
+    #    heartbeat timer keeps ticking against a closed socket. Pre-fix,
+    #    the parent asserted in TcpConnection::write ~10s after rejection
+    #    (because the heartbeat timer was constructed enabled and never
+    #    got disabled when the hello was rejected). Send a bad hello,
+    #    wait past the 10s tx-heartbeat threshold, then confirm /status
+    #    still responds (i.e. the parent process is alive).
+    def test_rejection_does_not_crash_parent(self):
+        peer = SatellitePeer()
+        peer.connect_satellite()
+        priority = struct.unpack("!I", os.urandom(4))[0]
+        hello = build_trunk_hello(T.SATELLITE_PINNED_ID, "", priority,
+                                  SAT_SECRET, role=ROLE_SATELLITE)
+        send_frame(peer.sock, hello)
+        peer.close()
+        # Past the t=10s heartbeat tx tick where the pre-fix crash fired.
+        time.sleep(11.0)
+        status = get_status(*_http(PRIMARY))
+        self.assertIsInstance(status, dict, "parent /status not responding")
+        self.assertNotIn(T.SATELLITE_PINNED_ID, status.get("satellites", {}),
+                         "phantom satellite entry after rejection")
+
+    # 5. Malformed SECRET_<bad.id>= is ignored at startup; the id still
     #    authenticates via the default fallback.
     #
     # We don't grep docker logs for the startup warning here (rolling
