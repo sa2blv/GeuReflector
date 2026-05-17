@@ -356,6 +356,36 @@ LISTEN_PORT=5303
 SECRET=regional_satellite_secret
 ```
 
+`SECRET=` is the shared fallback used by every satellite. To pin a
+satellite to its own secret (so that compromising the fallback cannot
+impersonate it, and rotating one satellite does not require touching
+the others), add per-id entries alongside:
+
+```ini
+[SATELLITE]
+LISTEN_PORT=5303
+SECRET=regional_satellite_secret
+SECRET_alpha=secret_for_alpha
+SECRET_bravo-east=secret_for_bravo_east
+```
+
+The id after `SECRET_` is matched case-sensitively against the
+satellite's `SATELLITE_ID`. Allowed id characters: `[A-Za-z0-9-]+`
+(alphanumeric + dash; **no underscore**). Malformed keys are logged and
+ignored at startup.
+
+Lookup rule when a satellite connects:
+
+1. If `SECRET_<id>=` is set for the satellite's id, verify against
+   that value. **Mismatch rejects the connection — there is no
+   fallback once an id is pinned.**
+2. Otherwise, fall back to `SECRET=` if set.
+3. Otherwise, reject.
+
+Keeping `SECRET=` alongside the per-id entries is backward-compatible:
+existing satellites with no per-id entry continue to authenticate via
+the default.
+
 **Satellite side** — set `SATELLITE_OF` in `[GLOBAL]` instead of
 `LOCAL_PREFIX` and `[TRUNK_x]` sections:
 
