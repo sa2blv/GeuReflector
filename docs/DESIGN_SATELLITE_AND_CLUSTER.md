@@ -44,13 +44,13 @@ On the **parent reflector** (existing reflector, no role change needed):
 
 ```ini
 [GLOBAL]
-LOCAL_PREFIX=01
+LOCAL_PREFIX=22201
 
 # Existing trunk config unchanged
 [TRUNK_01_02]
 HOST=reflector-02.example.com
 SECRET=secret_01_02
-REMOTE_PREFIX=02
+REMOTE_PREFIX=22202
 
 # NEW: accept satellite connections
 [SATELLITE]
@@ -207,7 +207,7 @@ New `[GLOBAL]` key `CLUSTER_TGS`:
 
 ```ini
 [GLOBAL]
-LOCAL_PREFIX=01
+LOCAL_PREFIX=22201
 # Cluster TGs: broadcast to all trunk peers regardless of prefix
 # Comma-separated list of individual TGs
 CLUSTER_TGS=222,2221,2222,91

@@ -160,14 +160,19 @@ In the `[GLOBAL]` section:
 ```ini
 [GLOBAL]
 # ... existing settings ...
-LOCAL_PREFIX=1        # this reflector owns TGs starting with "1"
+LOCAL_PREFIX=262      # this reflector owns TGs starting with "262"
+                      # Use your country's Mobile Country Code (MCC):
+                      # e.g. 222 = Italy, 240 = Sweden, 262 = Germany.
+                      # Anchoring on the MCC keeps your prefix space
+                      # from colliding with other countries' reflectors.
+                      # Full table: docs/MCC_COUNTRY_CODES.md
 ```
 
 A comma-separated list is accepted if this reflector covers multiple prefix
-groups:
+groups (e.g. a country that holds more than one MCC):
 
 ```ini
-LOCAL_PREFIX=11,12,13
+LOCAL_PREFIX=234,235  # United Kingdom (two MCC blocks)
 ```
 
 ### 6b. Add a trunk section for each peer
@@ -175,18 +180,24 @@ LOCAL_PREFIX=11,12,13
 At the end of the config file, add one `[TRUNK_x]` section per peer reflector:
 
 ```ini
-[TRUNK_1_2]
-HOST=reflector-b.example.com
+[TRUNK_DE_SE]
+HOST=reflector-se.example.com
 PORT=5302
 SECRET=a_strong_shared_secret
-REMOTE_PREFIX=2
+REMOTE_PREFIX=240
 ```
 
 - **The section name must be identical on both sides.** Both sysops must agree
-  on a shared name (e.g. `TRUNK_1_2` for the link between prefix 1 and 2).
+  on a shared name (e.g. `TRUNK_DE_SE` for the link between Germany (`262`)
+  and Sweden (`240`); ISO 3166-1 alpha-2 codes in alphabetical order is a
+  readable convention).
 - `PORT` defaults to `5302` if omitted.
 - Both sides must use the same `SECRET`.
 - `REMOTE_PREFIX` also accepts a comma-separated list.
+
+For fuller examples, see [`docs/DEPLOYMENT_ITALY.md`](DEPLOYMENT_ITALY.md)
+(20-region national mesh) and [`docs/WW_DEPLOYMENT.md`](WW_DEPLOYMENT.md)
+(25-country worldwide mesh).
 
 ### 6c. Optional: enable the HTTP status endpoint
 
@@ -239,8 +250,8 @@ journalctl -u svxreflector -f
 A successful trunk connection looks like:
 
 ```
-TRUNK_1_2: Connected to reflector-b.example.com:5302
-TRUNK_1_2: Trunk hello from peer 'TRUNK_1_2' local_prefix=2 priority=3847291042
+TRUNK_DE_SE: Connected to reflector-se.example.com:5302
+TRUNK_DE_SE: Trunk hello from peer 'TRUNK_DE_SE' local_prefix=240 priority=3847291042
 ```
 
 If `HTTP_SRV_PORT` is set, query the status endpoint:
