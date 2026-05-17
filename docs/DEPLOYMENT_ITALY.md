@@ -53,13 +53,15 @@ connected to any DMR network.** The TG numbers are used here purely as a
 convenient and meaningful identifier space — no DMR radio, hotspot, or repeater
 is involved.
 
-The Italian DMR TG numbers all start with the national prefix `222`. That prefix
-is stripped when setting `LOCAL_PREFIX`, so each reflector is configured with the
-2-digit regional code only (e.g. TG `22201` → `LOCAL_PREFIX=01`).
+The Italian DMR TG numbers all start with the national prefix `222`. **Keep that
+prefix in `LOCAL_PREFIX`** so the reflector advertises its membership in the
+Italy MCC space (e.g. TG `22201` → `LOCAL_PREFIX=22201`). This avoids
+collisions with other countries' deployments — every country's reflectors
+should anchor their prefixes on their own MCC.
 
 Both `LOCAL_PREFIX` and `REMOTE_PREFIX` accept a comma-separated list of prefixes,
 so a single reflector instance can own multiple regions
-(e.g. `LOCAL_PREFIX=11,12,13` for Liguria, Piemonte and Valle d'Aosta).
+(e.g. `LOCAL_PREFIX=22211,22212,22213` for Liguria, Piemonte and Valle d'Aosta).
 
 ---
 
@@ -67,26 +69,26 @@ so a single reflector instance can own multiple regions
 
 | Region                    | TG      | LOCAL_PREFIX | Suggested hostname                  |
 |---------------------------|---------|--------------|-------------------------------------|
-| LAZIO                     | 22201   | 01           | svxref-lazio.example.it             |
-| SARDEGNA                  | 22202   | 02           | svxref-sardegna.example.it          |
-| UMBRIA                    | 22203   | 03           | svxref-umbria.example.it            |
-| LIGURIA                   | 22211   | 11           | svxref-liguria.example.it           |
-| PIEMONTE                  | 22212   | 12           | svxref-piemonte.example.it          |
-| VALLE D'AOSTA             | 22213   | 13           | svxref-valledaosta.example.it       |
-| LOMBARDIA                 | 22221   | 21           | svxref-lombardia.example.it         |
-| FRIULI VENEZIA GIULIA     | 22231   | 31           | svxref-friuli.example.it            |
-| TRENTINO ALTO ADIGE       | 22232   | 32           | svxref-trentino.example.it          |
-| VENETO                    | 22233   | 33           | svxref-veneto.example.it            |
-| EMILIA ROMAGNA            | 22241   | 41           | svxref-emilia.example.it            |
-| TOSCANA                   | 22251   | 51           | svxref-toscana.example.it           |
-| ABRUZZO                   | 22261   | 61           | svxref-abruzzo.example.it           |
-| MARCHE                    | 22262   | 62           | svxref-marche.example.it            |
-| PUGLIA                    | 22271   | 71           | svxref-puglia.example.it            |
-| BASILICATA                | 22281   | 81           | svxref-basilicata.example.it        |
-| CALABRIA                  | 22282   | 82           | svxref-calabria.example.it          |
-| CAMPANIA                  | 22283   | 83           | svxref-campania.example.it          |
-| MOLISE                    | 22284   | 84           | svxref-molise.example.it            |
-| SICILIA                   | 22291   | 91           | svxref-sicilia.example.it           |
+| LAZIO                     | 22201   | 22201        | svxref-lazio.example.it             |
+| SARDEGNA                  | 22202   | 22202        | svxref-sardegna.example.it          |
+| UMBRIA                    | 22203   | 22203        | svxref-umbria.example.it            |
+| LIGURIA                   | 22211   | 22211        | svxref-liguria.example.it           |
+| PIEMONTE                  | 22212   | 22212        | svxref-piemonte.example.it          |
+| VALLE D'AOSTA             | 22213   | 22213        | svxref-valledaosta.example.it       |
+| LOMBARDIA                 | 22221   | 22221        | svxref-lombardia.example.it         |
+| FRIULI VENEZIA GIULIA     | 22231   | 22231        | svxref-friuli.example.it            |
+| TRENTINO ALTO ADIGE       | 22232   | 22232        | svxref-trentino.example.it          |
+| VENETO                    | 22233   | 22233        | svxref-veneto.example.it            |
+| EMILIA ROMAGNA            | 22241   | 22241        | svxref-emilia.example.it            |
+| TOSCANA                   | 22251   | 22251        | svxref-toscana.example.it           |
+| ABRUZZO                   | 22261   | 22261        | svxref-abruzzo.example.it           |
+| MARCHE                    | 22262   | 22262        | svxref-marche.example.it            |
+| PUGLIA                    | 22271   | 22271        | svxref-puglia.example.it            |
+| BASILICATA                | 22281   | 22281        | svxref-basilicata.example.it        |
+| CALABRIA                  | 22282   | 22282        | svxref-calabria.example.it          |
+| CAMPANIA                  | 22283   | 22283        | svxref-campania.example.it          |
+| MOLISE                    | 22284   | 22284        | svxref-molise.example.it            |
+| SICILIA                   | 22291   | 22291        | svxref-sicilia.example.it           |
 
 ---
 
@@ -117,7 +119,7 @@ IT_84_91   # MOLISE ↔ SICILIA
 ```ini
 [GLOBAL]
 LISTEN_PORT=5300
-LOCAL_PREFIX=01
+LOCAL_PREFIX=22201
 CLUSTER_TGS=222
 HTTP_SRV_PORT=8080
 COMMAND_PTY=/dev/shm/reflector_ctrl
@@ -126,124 +128,127 @@ COMMAND_PTY=/dev/shm/reflector_ctrl
 HOST=svxref-sardegna.example.it
 PORT=5302
 SECRET=IT_01_02
-REMOTE_PREFIX=02
+REMOTE_PREFIX=22202
 
 [TRUNK_01_03]
 HOST=svxref-umbria.example.it
 PORT=5302
 SECRET=IT_01_03
-REMOTE_PREFIX=03
+REMOTE_PREFIX=22203
 
 [TRUNK_01_11]
 HOST=svxref-liguria.example.it
 PORT=5302
 SECRET=IT_01_11
-REMOTE_PREFIX=11
+REMOTE_PREFIX=22211
 
 [TRUNK_01_12]
 HOST=svxref-piemonte.example.it
 PORT=5302
 SECRET=IT_01_12
-REMOTE_PREFIX=12
+REMOTE_PREFIX=22212
 
 [TRUNK_01_13]
 HOST=svxref-valledaosta.example.it
 PORT=5302
 SECRET=IT_01_13
-REMOTE_PREFIX=13
+REMOTE_PREFIX=22213
 
 [TRUNK_01_21]
 HOST=svxref-lombardia.example.it
 PORT=5302
 SECRET=IT_01_21
-REMOTE_PREFIX=21
+REMOTE_PREFIX=22221
 
 [TRUNK_01_31]
 HOST=svxref-friuli.example.it
 PORT=5302
 SECRET=IT_01_31
-REMOTE_PREFIX=31
+REMOTE_PREFIX=22231
 
 [TRUNK_01_32]
 HOST=svxref-trentino.example.it
 PORT=5302
 SECRET=IT_01_32
-REMOTE_PREFIX=32
+REMOTE_PREFIX=22232
 
 [TRUNK_01_33]
 HOST=svxref-veneto.example.it
 PORT=5302
 SECRET=IT_01_33
-REMOTE_PREFIX=33
+REMOTE_PREFIX=22233
 
 [TRUNK_01_41]
 HOST=svxref-emilia.example.it
 PORT=5302
 SECRET=IT_01_41
-REMOTE_PREFIX=41
+REMOTE_PREFIX=22241
 
 [TRUNK_01_51]
 HOST=svxref-toscana.example.it
 PORT=5302
 SECRET=IT_01_51
-REMOTE_PREFIX=51
+REMOTE_PREFIX=22251
 
 [TRUNK_01_61]
 HOST=svxref-abruzzo.example.it
 PORT=5302
 SECRET=IT_01_61
-REMOTE_PREFIX=61
+REMOTE_PREFIX=22261
 
 [TRUNK_01_62]
 HOST=svxref-marche.example.it
 PORT=5302
 SECRET=IT_01_62
-REMOTE_PREFIX=62
+REMOTE_PREFIX=22262
 
 [TRUNK_01_71]
 HOST=svxref-puglia.example.it
 PORT=5302
 SECRET=IT_01_71
-REMOTE_PREFIX=71
+REMOTE_PREFIX=22271
 
 [TRUNK_01_81]
 HOST=svxref-basilicata.example.it
 PORT=5302
 SECRET=IT_01_81
-REMOTE_PREFIX=81
+REMOTE_PREFIX=22281
 
 [TRUNK_01_82]
 HOST=svxref-calabria.example.it
 PORT=5302
 SECRET=IT_01_82
-REMOTE_PREFIX=82
+REMOTE_PREFIX=22282
 
 [TRUNK_01_83]
 HOST=svxref-campania.example.it
 PORT=5302
 SECRET=IT_01_83
-REMOTE_PREFIX=83
+REMOTE_PREFIX=22283
 
 [TRUNK_01_84]
 HOST=svxref-molise.example.it
 PORT=5302
 SECRET=IT_01_84
-REMOTE_PREFIX=84
+REMOTE_PREFIX=22284
 
 [TRUNK_01_91]
 HOST=svxref-sicilia.example.it
 PORT=5302
 SECRET=IT_01_91
-REMOTE_PREFIX=91
+REMOTE_PREFIX=22291
 ```
 
 All other regional configs follow the same pattern: set `LOCAL_PREFIX` to the
-region's 2-digit code and add one `[TRUNK_xx_yy]` section for each of the other
+region's 5-digit MCC-prefixed code from the inventory table (`222` + the 2-digit
+regional code) and add one `[TRUNK_xx_yy]` section for each of the other
 19 regions, where `xx` and `yy` are the sorted pair of region codes (lower code
-first). Both sides of a trunk link must use the **same section name** — for
-example, the link between regions 02 and 21 is named `[TRUNK_02_21]` on both
-the SARDEGNA and LOMBARDIA reflectors. Use the matching `SECRET` from the
-convention above.
+first, keeping the 2-digit form for readability of the section name). Both
+sides of a trunk link must use the **same section name** — for example, the
+link between regions 02 and 21 is named `[TRUNK_02_21]` on both the SARDEGNA
+and LOMBARDIA reflectors, but each side sets `REMOTE_PREFIX` to the peer's
+full 5-digit prefix (e.g. `22221` for Lombardia). Use the matching `SECRET`
+from the convention above.
 
 ---
 
@@ -341,7 +346,8 @@ open port `5303` inbound on the regional reflector firewall.
 
 ## Per-region config checklist
 
-1. Set `LOCAL_PREFIX` to the 2-digit code from the table above.
+1. Set `LOCAL_PREFIX` to the 5-digit MCC-prefixed code from the table above
+   (e.g. Lazio = `22201`, not the bare `01`).
 2. Add one `[TRUNK_xx_yy]` section for **every other region** (19 sections total),
    where `xx` and `yy` are the sorted pair of region codes (lower first). Both
    sides of a trunk link must use the **same** `[TRUNK_xx_yy]` section name.
