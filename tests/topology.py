@@ -67,16 +67,17 @@ SATELLITE = {
 }
 
 # Extra satellite identities used by tests/test_satellite_secrets.py.
-# - SAT_PINNED has its own SECRET_<id>=... entry in the parent's
+# Ids use dashes only — the per-id charset is [A-Za-z0-9-]+ (no underscore).
+# - SAT-PINNED has its own SECRET_<id>=... entry in the parent's
 #   [SATELLITE] section.
-# - SAT_UNPINNED has no per-id entry; it falls through to the default
+# - SAT-UNPINNED has no per-id entry; it falls through to the default
 #   [SATELLITE].SECRET.
 # - SAT_BAD_KEY_ID is the *id* used to verify that a malformed
 #   SECRET_<bad.id>=... key is ignored at startup; this satellite uses
 #   the default secret too.
-SATELLITE_PINNED_ID     = "SAT_PINNED"
+SATELLITE_PINNED_ID     = "SAT-PINNED"
 SATELLITE_PINNED_SECRET = "secret_pinned"
-SATELLITE_UNPINNED_ID   = "SAT_UNPINNED"
+SATELLITE_UNPINNED_ID   = "SAT-UNPINNED"
 SATELLITE_BAD_KEY_ID    = "bad.id"
 SATELLITE_BAD_KEY       = f"SECRET_{SATELLITE_BAD_KEY_ID}"
 SATELLITE_BAD_VALUE     = "ignored_by_startup_validator"
