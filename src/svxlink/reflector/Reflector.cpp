@@ -462,10 +462,6 @@ bool Reflector::initialize(Async::Config &cfg)
   ReflectorTrunkManager::instance()->setConfig(m_cfg);
   ReflectorTrunkManager::instance()->init();
 
-
-  ReflectorTrunkManager::instance()->init();
-
-
   std::string listen_port("5300");
   cfg.getValue("GLOBAL", "LISTEN_PORT", listen_port);
   m_srv = new TcpServer<FramedTcpConnection>(listen_port);
