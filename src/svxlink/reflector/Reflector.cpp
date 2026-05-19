@@ -521,6 +521,15 @@ bool Reflector::initialize(Async::Config &cfg)
       !satellite_of.empty())
   {
     m_is_satellite = true;
+    std::string sat_listen_port_unused;
+    if (cfg.getValue("SATELLITE", "LISTEN_PORT", sat_listen_port_unused))
+    {
+      geulog::warn("core",
+          "[SATELLITE] section is ignored on a satellite node "
+          "(SATELLITE_OF is set). Satellites are leaf nodes and cannot "
+          "accept child satellites; remove the [SATELLITE] block or "
+          "unset SATELLITE_OF.");
+    }
     m_satellite_client = new SatelliteClient(this, cfg);
     if (!m_satellite_client->initialize())
     {
