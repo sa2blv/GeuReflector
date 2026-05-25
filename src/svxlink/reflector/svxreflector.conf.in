@@ -121,7 +121,9 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 # component for this link, so set it to a stable, broker-friendly name.
 #PEER_ID=reflector-a
 # Optional per-trunk TG filters (syntax: exact "26200", prefix "24*",
-# range "2427-2438", comma-separated):
+# range "2427-2438", comma-separated). These gate audio/talker traffic AND
+# trim the peer's node roster shown under /status.trunks[<section>].nodes
+# (and its MQTT/Redis mirror), so a filtered TG never pollutes the roster.
 #BLACKLIST_TGS=666,777*       # never carried in either direction on this link
 #ALLOW_TGS=24*,2624123        # if set, ONLY these TGs are exchanged
 # Optional bidirectional TG remap (peer_tg:local_tg, comma-separated).

@@ -2044,6 +2044,16 @@ void TrunkLink::handleMsgPeerNodeList(std::istream& is)
       continue;
     }
     e.tg       = n.tg;
+
+    // Per-link TG filter: a node whose selected TG is blacklisted or falls
+    // outside ALLOW_TGS on this link is dropped from the roster entirely,
+    // mirroring the audio/talker receive gate (handleMsgPeerTalkerStart).
+    // This keeps filtered TGs out of /status, MQTT and the Redis mirror —
+    // m_partner_nodes feeds statusJson() and onPeerNodeList() only.
+    if (isBlacklisted(e.tg) || isBlacklisted(mapTgIn(e.tg)) || !isAllowed(e.tg))
+    {
+      continue;
+    }
     e.qth_name = sanitizeText(n.qth_name, 64);
 
     // Lat/lon: reject non-finite; drop out-of-range values by zeroing

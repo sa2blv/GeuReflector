@@ -1670,6 +1670,48 @@ class TestTrunkIntegration(unittest.TestCase):
             peer.close()
 
     # ------------------------------------------------------------------
+    # Test 21b: per-link TG filter trims the node roster in /status
+    # ------------------------------------------------------------------
+    def test_21b_filter_drops_nodes_from_roster(self):
+        """A peer-advertised node whose selected TG is blacklisted (or not in
+        ALLOW_TGS) must NOT appear under /status.trunks[X].nodes — the same
+        per-link filter that gates audio/active_talkers also trims the roster.
+        """
+        peer = TrunkPeer()
+        peer.connect(*_trunk(self.PRIMARY))
+        peer.handshake(trunk_id="TRUNK_TEST_FILTER",
+                       local_prefix=FILTER_PREFIX,
+                       secret=FILTER_SECRET)
+        try:
+            blocked_tg = int(T.TEST_PEER_FILTER["blacklist_tgs"])  # 12345
+            allowed_tg = 7100   # matches ALLOW_TGS "7*"
+            disallowed_tg = 99  # matches neither "7*" nor "1220"
+            peer.send_node_list([
+                ("N0ROK", allowed_tg),
+                ("N0RBL", blocked_tg),
+                ("N0RDIS", disallowed_tg),
+            ])
+
+            def roster_callsigns():
+                status = get_status(*_http(self.PRIMARY))
+                nodes = status["trunks"].get(
+                    "TRUNK_TEST_FILTER", {}).get("nodes", [])
+                return {n.get("callsign") for n in nodes}
+
+            # The allowed-TG node must appear (proves the roster was ingested)
+            wait_until(lambda: "N0ROK" in roster_callsigns(),
+                timeout=5.0, interval=0.25,
+                msg="Allowed-TG node N0ROK missing from trunk roster")
+
+            cs = roster_callsigns()
+            self.assertNotIn("N0RBL", cs,
+                f"Blacklisted-TG ({blocked_tg}) node leaked into roster: {cs}")
+            self.assertNotIn("N0RDIS", cs,
+                f"Disallowed-TG ({disallowed_tg}) node leaked into roster: {cs}")
+        finally:
+            peer.close()
+
+    # ------------------------------------------------------------------
     # Test 22: TG_MAP remaps incoming TGs
     # ------------------------------------------------------------------
     def test_22_tg_map_remap_in(self):
