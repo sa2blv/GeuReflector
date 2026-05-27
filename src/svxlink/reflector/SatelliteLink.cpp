@@ -418,6 +418,9 @@ void SatelliteLink::handleMsgPeerAudio(std::istream& is)
             ReflectorClient::PassiveObserverFilter(),
             ReflectorClient::EarliestMonitorTalkerFilter(tg)))));
 
+  // Resend to BLV sub trunk
+  m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, msg.tg(), "");
+
   // Forward to trunk peers
   m_reflector->forwardSatelliteRawAudioToTrunks(tg, msg.audio());
 
