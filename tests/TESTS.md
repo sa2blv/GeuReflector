@@ -6,7 +6,7 @@ The integration tests verify the trunk protocol, satellite links, twin (HA-pair)
 
 `run_tests.sh` runs in **two phases**:
 1. A 3-reflector trunk mesh + a satellite-mode reflector, exercising
-   `test_trunk.py` (50 tests), `test_mqtt_deltas.py` (7 tests),
+   `test_trunk.py` (52 tests), `test_mqtt_deltas.py` (7 tests),
    `test_satellite_secrets.py` (5 tests), and `test_logging.py` (6 tests).
 2. A 4-reflector twin topology exercising `test_twin.py` (17 tests).
 
@@ -24,7 +24,7 @@ bash run_tests.sh
 This will:
 1. Generate the default configs and `docker-compose.test.yml` from `topology.py`
 2. Build and start the 3-reflector mesh (+ a satellite-mode reflector)
-3. Run `test_trunk.py` (50), then `test_mqtt_deltas.py` (7), `test_satellite_secrets.py` (5), and `test_logging.py` (6). When run in a terminal, `test_trunk.py` ends with an interactive TG prompt (see [Interactive Mode](#interactive-mode)) before the other suites run
+3. Run `test_trunk.py` (52), then `test_mqtt_deltas.py` (7), `test_satellite_secrets.py` (5), and `test_logging.py` (6). When run in a terminal, `test_trunk.py` ends with an interactive TG prompt (see [Interactive Mode](#interactive-mode)) before the other suites run
 4. Tear down the default mesh and regenerate with `--topology twin` (4-reflector twin topology)
 5. Rebuild the mesh and run `test_twin.py` (17 twin-protocol tests)
 6. Restore the default topology files and tear everything down
@@ -121,7 +121,7 @@ Internal port for `[TWIN]` is always 5304; satellite is 5303.
 |------|---------|
 | `topology.py` | Single source of truth — prefixes, ports, secrets, cluster TGs, test clients. Contains both the default mesh (`REFLECTORS`) and the `TWIN_REFLECTORS` / `TWIN_TRUNKS` definitions. |
 | `generate_configs.py` | Generates `configs/*.conf` and `docker-compose.test.yml` from topology. Supports `--topology default` (implicit) and `--topology twin`. |
-| `test_trunk.py` | Test harness: fake trunk peers, satellite peer, V2 client, 50 test cases, interactive loop. |
+| `test_trunk.py` | Test harness: fake trunk peers, satellite peer, V2 client, 52 test cases, interactive loop. |
 | `test_mqtt_deltas.py` | Peer-client liveness MQTT delta tests (7 cases): per-client connect/disconnect/rx events published as `peer/<peer_id>/client/<call>/<event>`, across the satellite axis and trunk-peer non-propagation. Runs on the default mesh. |
 | `test_satellite_secrets.py` | Per-satellite secret resolver tests (5 cases): `SECRET_<id>` match accepts, mismatch rejects with no fallback, unknown id falls back to `[SATELLITE].SECRET`. Runs on the default mesh. |
 | `test_logging.py` | Logging-facade (`geulog::`) tests (6 cases): `LOG` PTY commands (SHOW/SET/RESET), level filtering, error rejection via the `/dev/shm/reflector_ctrl` PTY. Runs on the default mesh. |
@@ -215,6 +215,8 @@ each filter independently of the other trunk fixtures.
 | 19 | `PEER_ID` in hello | Reflector advertises the configured `PEER_ID` (not the section name) in `MsgPeerHello` |
 | 20 | `BLACKLIST_TGS` drops TG | TalkerStart on a blacklisted TG is dropped (not in `/status` active talkers) |
 | 21 | `ALLOW_TGS` whitelist | TG matching the whitelist passes; TG outside is dropped |
+| 21b | Filter trims node roster | A peer node whose **selected** TG is blacklisted or outside `ALLOW_TGS` is dropped from `/status.trunks[SECTION].nodes` (same gate as audio/active talkers) |
+| 21c | Filter trims `monitoredTGs` | A node kept on a permitted selected TG has non-permitted entries scrubbed from its status-blob `monitoredTGs` array |
 | 22 | `TG_MAP` remap | TalkerStart on wire TG `7000` is remapped and tracked as local TG `1220` |
 | 23 | PTY `TRUNK STATUS` | Command is accepted; `TRUNK_TEST_FILTER` is loaded by the reflector |
 | 24 | PTY `TRUNK MUTE` | Audio from a muted callsign is dropped before reaching local clients |
