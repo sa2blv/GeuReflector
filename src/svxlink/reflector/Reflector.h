@@ -387,6 +387,12 @@ class Reflector : public sigc::trackable
     void broadcastUdpMsg_BLV_TRUNK(const MsgUdpAudio& msg, int tg,std::string tg_send);
 
 
+    // Drop a no-longer-tracked inbound trunk connection from the inbound map.
+    // Used by TrunkLink when it proactively disconnects an inbound peer (e.g.
+    // a heartbeat timeout), since TcpConnection::disconnect() does not emit the
+    // disconnected signal that would otherwise trigger trunkClientDisconnected.
+    void forgetInboundTrunkConnection(Async::FramedTcpConnection* con);
+
     // Triggered when a local client logs in/out or changes TG. Schedules
     // a debounced node-list emission to all trunk peers and to MQTT.
     void scheduleNodeListUpdate(void);

@@ -1310,6 +1310,10 @@ void TrunkLink::sendMsg(const ReflectorMsg& msg)
 
 void TrunkLink::sendMsgOnOutbound(const ReflectorMsg& msg)
 {
+  // Defense in depth: callers gate on isOutboundReady() (which checks
+  // isConnected()), but never write to a closed socket regardless —
+  // AsyncTcpConnection::write() asserts sock >= 0.
+  if (!m_con.isConnected()) return;
   ostringstream ss;
   ReflectorMsg header(msg.type());
   if (!header.pack(ss) || !msg.pack(ss))
@@ -1325,7 +1329,11 @@ void TrunkLink::sendMsgOnOutbound(const ReflectorMsg& msg)
 
 void TrunkLink::sendMsgOnInbound(const ReflectorMsg& msg)
 {
-  if (m_inbound_con == nullptr) return;
+  // Never write to a closed socket: AsyncTcpConnection::write() asserts
+  // sock >= 0. The pointer can outlive its socket when we disconnect() the
+  // inbound ourselves (heartbeat timeout) — disconnect() closes the fd
+  // without emitting the disconnected signal that clears m_inbound_con.
+  if (m_inbound_con == nullptr || !m_inbound_con->isConnected()) return;
   ostringstream ss;
   ReflectorMsg header(msg.type());
   if (!header.pack(ss) || !msg.pack(ss))
@@ -1453,7 +1461,17 @@ void TrunkLink::heartbeatTick(Async::Timer* t)
     if (--m_ib_hb_rx_cnt == 0)
     {
       geulog::error("trunk", "[", m_section, "] Inbound heartbeat timeout");
-      m_inbound_con->disconnect();
+      // disconnect() closes the socket but does NOT emit the disconnected
+      // signal, so neither the trunk server's onDisconnected nor
+      // onInboundDisconnected runs on its own. Drive the cleanup ourselves so
+      // the link stops advertising a dead inbound (otherwise isInboundReady()
+      // lies and acceptInboundConnection rejects every reconnect), and drop
+      // the now-dead connection from the reflector's inbound map.
+      Async::FramedTcpConnection* dead = m_inbound_con;
+      dead->disconnect();
+      m_reflector->forgetInboundTrunkConnection(dead);
+      onInboundDisconnected(
+          dead, Async::FramedTcpConnection::DR_ORDERED_DISCONNECT);
     }
     else if (m_ib_hb_rx_cnt <= 5)
     {
@@ -1518,7 +1536,8 @@ bool TrunkLink::isInboundReady(void) const
     }
     return false;
   }
-  return m_inbound_con != nullptr && m_ib_hello_received;
+  return m_inbound_con != nullptr && m_ib_hello_received &&
+         m_inbound_con->isConnected();
 } /* TrunkLink::isInboundReady */
 
 
@@ -2046,6 +2065,16 @@ void TrunkLink::handleMsgPeerNodeList(std::istream& is)
       continue;
     }
     e.tg       = n.tg;
+
+    // Per-link TG filter: a node whose selected TG is blacklisted or falls
+    // outside ALLOW_TGS on this link is dropped from the roster entirely,
+    // mirroring the audio/talker receive gate (handleMsgPeerTalkerStart).
+    // This keeps filtered TGs out of /status, MQTT and the Redis mirror —
+    // m_partner_nodes feeds statusJson() and onPeerNodeList() only.
+    if (isBlacklisted(e.tg) || isBlacklisted(mapTgIn(e.tg)) || !isAllowed(e.tg))
+    {
+      continue;
+    }
     e.qth_name = sanitizeText(n.qth_name, 64);
 
     // Lat/lon: reject non-finite; drop out-of-range values by zeroing
@@ -2065,6 +2094,28 @@ void TrunkLink::handleMsgPeerNodeList(std::istream& is)
     }
     e.status = n.status;
     sanitizeJsonStrings(e.status);
+
+    // Trim non-permitted TGs out of the status blob's monitoredTGs array
+    // with the same per-link gate as the selected TG above. Otherwise a
+    // node kept because its *selected* TG is permitted could still surface
+    // filtered TGs it is only monitoring into /status, MQTT and the Redis
+    // mirror. Values stay in the peer's wire numbering, matching e.tg.
+    if (e.status.isMember("monitoredTGs") && e.status["monitoredTGs"].isArray())
+    {
+      Json::Value kept(Json::arrayValue);
+      for (const auto& mt : e.status["monitoredTGs"])
+      {
+        if (!mt.isUInt()) continue;                // drop malformed entries
+        const uint32_t tg = mt.asUInt();
+        if (isBlacklisted(tg) || isBlacklisted(mapTgIn(tg)) || !isAllowed(tg))
+        {
+          continue;
+        }
+        kept.append(tg);
+      }
+      e.status["monitoredTGs"] = kept;             // may be empty
+    }
+
     // Recipient-relative sat_id from the peer. Pass through as-is after
     // bounded sanitisation: empty = "on the peer itself", non-empty =
     // "on a satellite attached to the peer".

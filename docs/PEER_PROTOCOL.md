@@ -545,6 +545,20 @@ or TG change, debounced to 500 ms, and broadcast to every trunk peer. Peers
 republish it via MQTT under `nodes/<peer_id>` so a central dashboard can see
 who is connected to each reflector.
 
+On ingest the receiver applies that link's per-trunk TG filter
+(`BLACKLIST_TGS` / `ALLOW_TGS`) to every entry, using the same match as the
+audio/talker receive gate (`isBlacklisted(tg) || isBlacklisted(mapTgIn(tg))
+|| !isAllowed(tg)`, so `TG_MAP` translation is honoured). A node whose
+selected TG is blacklisted or outside `ALLOW_TGS` is dropped from the roster
+entirely, so it never appears under `/status.trunks[<section>].nodes`, MQTT
+`nodes/<peer_id>`, or the Redis mirror — a filtered TG's roster is trimmed on
+this link just like its audio, even though the full snapshot is sent on the
+wire. (Satellite links filter on the *send* side via `SATELLITE_FILTER`; trunk
+links have no roster filtering on send, so the trim happens on receive.) The
+same gate is then applied to each kept entry's `monitoredTGs` array inside the
+status blob (see below), so a node retained because its *selected* TG is
+permitted cannot surface filtered TGs it is only monitoring.
+
 The optional `status_blobs[i]` field carries the source reflector's
 `m_status["nodes"][callsign]` JSON serialised verbatim — the same rich
 per-client status that local clients expose (rx/tx config, qth array,

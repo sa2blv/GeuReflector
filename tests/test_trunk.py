@@ -1670,6 +1670,88 @@ class TestTrunkIntegration(unittest.TestCase):
             peer.close()
 
     # ------------------------------------------------------------------
+    # Test 21b: per-link TG filter trims the node roster in /status
+    # ------------------------------------------------------------------
+    def test_21b_filter_drops_nodes_from_roster(self):
+        """A peer-advertised node whose selected TG is blacklisted (or not in
+        ALLOW_TGS) must NOT appear under /status.trunks[X].nodes — the same
+        per-link filter that gates audio/active_talkers also trims the roster.
+        """
+        peer = TrunkPeer()
+        peer.connect(*_trunk(self.PRIMARY))
+        peer.handshake(trunk_id="TRUNK_TEST_FILTER",
+                       local_prefix=FILTER_PREFIX,
+                       secret=FILTER_SECRET)
+        try:
+            blocked_tg = int(T.TEST_PEER_FILTER["blacklist_tgs"])  # 12345
+            allowed_tg = 7100   # matches ALLOW_TGS "7*"
+            disallowed_tg = 99  # matches neither "7*" nor "1220"
+            peer.send_node_list([
+                ("N0ROK", allowed_tg),
+                ("N0RBL", blocked_tg),
+                ("N0RDIS", disallowed_tg),
+            ])
+
+            def roster_callsigns():
+                status = get_status(*_http(self.PRIMARY))
+                nodes = status["trunks"].get(
+                    "TRUNK_TEST_FILTER", {}).get("nodes", [])
+                return {n.get("callsign") for n in nodes}
+
+            # The allowed-TG node must appear (proves the roster was ingested)
+            wait_until(lambda: "N0ROK" in roster_callsigns(),
+                timeout=5.0, interval=0.25,
+                msg="Allowed-TG node N0ROK missing from trunk roster")
+
+            cs = roster_callsigns()
+            self.assertNotIn("N0RBL", cs,
+                f"Blacklisted-TG ({blocked_tg}) node leaked into roster: {cs}")
+            self.assertNotIn("N0RDIS", cs,
+                f"Disallowed-TG ({disallowed_tg}) node leaked into roster: {cs}")
+        finally:
+            peer.close()
+
+    # ------------------------------------------------------------------
+    # Test 21c: per-link TG filter trims monitoredTGs inside the status blob
+    # ------------------------------------------------------------------
+    def test_21c_filter_trims_monitored_tgs_in_blob(self):
+        """A node kept because its SELECTED TG is permitted must still have
+        non-permitted entries trimmed from its status blob's monitoredTGs
+        array — the same per-link gate that drops whole entries (test_21b)
+        also scrubs the monitored list so filtered TGs never surface under
+        /status.trunks[X].nodes[*].monitoredTGs.
+        """
+        peer = TrunkPeer()
+        peer.connect(*_trunk(self.PRIMARY))
+        peer.handshake(trunk_id="TRUNK_TEST_FILTER",
+                       local_prefix=FILTER_PREFIX,
+                       secret=FILTER_SECRET)
+        try:
+            blocked_tg = int(T.TEST_PEER_FILTER["blacklist_tgs"])  # 12345
+            # monitor list mixes allowed (7*), blacklisted, and disallowed TGs
+            blob = json.dumps({"monitoredTGs": [7100, blocked_tg, 99, 7205]})
+            # selected TG 7100 is permitted, so the node itself is kept
+            peer.send_node_list([("N0RMON", 7100, 0.0, 0.0, "", blob, "")])
+
+            def monitored():
+                status = get_status(*_http(self.PRIMARY))
+                nodes = status["trunks"].get(
+                    "TRUNK_TEST_FILTER", {}).get("nodes", [])
+                for n in nodes:
+                    if n.get("callsign") == "N0RMON":
+                        return n.get("monitoredTGs")
+                return None
+
+            wait_until(lambda: monitored() is not None,
+                timeout=5.0, interval=0.25,
+                msg="Kept node N0RMON missing from trunk roster")
+
+            self.assertEqual(sorted(monitored()), [7100, 7205],
+                f"monitoredTGs leaked filtered TGs: {monitored()}")
+        finally:
+            peer.close()
+
+    # ------------------------------------------------------------------
     # Test 22: TG_MAP remaps incoming TGs
     # ------------------------------------------------------------------
     def test_22_tg_map_remap_in(self):
@@ -3118,6 +3200,115 @@ class TestTrunkIntegration(unittest.TestCase):
         finally:
             a_client.close()
             c_client.close()
+
+    def test_46_inbound_heartbeat_timeout_no_crash(self):
+        """Regression: a non-paired trunk link whose inbound socket the
+        reflector closes on heartbeat timeout must not abort the process on
+        the next send (assert sock>=0 in AsyncTcpConnection::write).
+
+        Mirrors the production incident. TRUNK_TEST's outbound leg points at
+        the unroutable 192.0.2.1, so only the inbound leg (this mock peer) is
+        ever up. The peer goes silent; ~15s later the reflector times out the
+        inbound RX heartbeat and calls m_inbound_con->disconnect(), which does
+        NOT emit the disconnected signal -> onInboundDisconnected never runs,
+        so m_inbound_con stays non-null and m_ib_hello_received stays true and
+        isInboundReady() lies. A client then publishes a monitored-TG set that
+        is shared toward TRUNK_TEST (prefix 9); the resulting MsgPeerTgInterest
+        send falls through to sendMsgOnInbound, which writes to the closed
+        socket -> SIGABRT. With no restart policy the container then exits, so
+        /status becomes unreachable.
+        """
+        target = self.PRIMARY
+
+        # 1. Inbound-only trunk peer on TRUNK_TEST (its outbound leg is down).
+        peer = TrunkPeer()
+        peer.connect(*_trunk(target))
+        msg_type, _ = peer.handshake()  # TRUNK_TEST, prefix 9, test_secret
+        self.assertEqual(msg_type, MSG_TRUNK_HELLO)
+        wait_until(
+            lambda: get_status(*_http(target))["trunks"]["TRUNK_TEST"]
+                    .get("inbound_connected", False),
+            timeout=10.0, msg="TRUNK_TEST inbound did not connect")
+
+        client = None
+        try:
+            # 2. Go silent (send no heartbeats, keep the socket open) so the
+            #    reflector times out the inbound RX (HEARTBEAT_RX_CNT_RESET=15
+            #    @ 1s) and self-disconnects it. Do NOT peer.close() here: a
+            #    clean close fires the disconnected signal and cleans up.
+            #    The timeout log line has no /status equivalent on the buggy
+            #    build (inbound_connected stays true), so gate on the log.
+            wait_until(
+                lambda: "Inbound heartbeat timeout" in
+                        docker_logs_since(target, since="40s"),
+                timeout=30.0, interval=1.0,
+                msg="reflector did not time out the silent inbound trunk")
+
+            # 3. Trigger: a client publishes a monitored-TG set shared toward
+            #    TRUNK_TEST (prefix 9), scheduling a MsgPeerTgInterest on it.
+            shared_tg = int(TEST_PREFIX_FIRST + "123")  # e.g. 9123, owned by peer
+            client = ClientPeer()
+            client.connect(HOST, T.mapped_client_port(target))
+            client.authenticate()
+            client.monitor_tgs([shared_tg])
+
+            # 4. The 500ms TG-interest debounce fires the send. The reflector
+            #    must still be alive afterwards (no assert abort / exit).
+            time.sleep(2.0)
+            try:
+                get_status(*_http(target))
+            except Exception as e:
+                self.fail(
+                    f"reflector '{target}' crashed after inbound heartbeat "
+                    f"timeout + TG-interest send (write to closed socket): {e}")
+        finally:
+            if client is not None:
+                client.close()
+            peer.close()
+
+    def test_47_inbound_recovers_after_heartbeat_timeout(self):
+        """Robustness: after the reflector times out and drops a silent inbound
+        trunk peer, the same peer must be able to reconnect its inbound leg.
+
+        Guarding the send path alone stops the crash (test_46) but would leave
+        m_inbound_con dangling: /status would keep reporting a phantom inbound
+        and acceptInboundConnection (one inbound per non-paired link) would
+        reject every reconnect until the reflector restarts. The timeout path
+        must clear the inbound state so the link self-heals.
+        """
+        target = self.PRIMARY
+
+        # First inbound peer, then go silent until the reflector times it out.
+        peer1 = TrunkPeer()
+        peer1.connect(*_trunk(target))
+        self.assertEqual(peer1.handshake()[0], MSG_TRUNK_HELLO)
+        wait_until(
+            lambda: get_status(*_http(target))["trunks"]["TRUNK_TEST"]
+                    .get("inbound_connected", False),
+            timeout=10.0, msg="TRUNK_TEST inbound did not connect")
+        try:
+            # The reflector must clear the inbound from /status after timing it
+            # out — not leave a phantom that blocks reconnects.
+            wait_until(
+                lambda: not get_status(*_http(target))["trunks"]["TRUNK_TEST"]
+                        .get("inbound_connected", True),
+                timeout=30.0, interval=0.5,
+                msg="reflector left a phantom inbound after heartbeat timeout")
+        finally:
+            peer1.close()
+
+        # A fresh inbound from the same peer must now be accepted.
+        peer2 = TrunkPeer()
+        peer2.connect(*_trunk(target))
+        try:
+            self.assertEqual(peer2.handshake()[0], MSG_TRUNK_HELLO)
+            wait_until(
+                lambda: get_status(*_http(target))["trunks"]["TRUNK_TEST"]
+                        .get("inbound_connected", False),
+                timeout=10.0,
+                msg="TRUNK_TEST inbound did not recover after a timeout")
+        finally:
+            peer2.close()
 
 
 # ---------------------------------------------------------------------------
