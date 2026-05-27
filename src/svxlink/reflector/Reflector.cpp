@@ -4020,28 +4020,27 @@ void Reflector::sendNodeListToAllPeers(void)
     local_nodes.push_back(e);
   }
   
-      std::vector<MsgPeerNodeList::NodeEntry> combined_udp = local_nodes;
-  
-    for (const auto& peer_kv : m_peer_nodes_map)
-    {
-      const auto& peer_nodes = peer_kv.second;
-      local_nodes.insert(local_nodes.end(), 
-                        peer_nodes.begin(), 
-                        peer_nodes.end());
-    }
+   std::vector<MsgPeerNodeList::NodeEntry> combined_udp = local_nodes;
+   
+  for (const auto& peer_kv : m_peer_nodes_map)
+  {
+    const auto& peer_nodes = peer_kv.second;
+    local_nodes.insert(local_nodes.end(), peer_nodes.begin(), peer_nodes.end());
+  }
     
 
   // 2. Combined view = local + every connected satellite's stamped roster.
   // Each sat-supplied entry already carries sat_id == its satelliteId.
   std::vector<MsgPeerNodeList::NodeEntry> combined = local_nodes;
 
-  for (const auto& kv : m_satellite_con_map)
-  {
-    const auto& sat_nodes = kv.second->partnerNodes();
-    combined.insert(combined.end(), sat_nodes.begin(), sat_nodes.end());
-    combined_udp.insert(combined.end(), sat_nodes.begin(), sat_nodes.end());
-  }
-
+ for (const auto& kv : m_satellite_con_map)
+ {
+   const auto& sat_nodes = kv.second->partnerNodes();
+   combined.insert(combined.end(), sat_nodes.begin(), sat_nodes.end());
+  
+   // FIX: Use combined_udp.end() instead of combined.end()
+   combined_udp.insert(combined_udp.end(), sat_nodes.begin(), sat_nodes.end());
+ }
   // 3. Trunks and twin: full combined view. Trunk peers and twin partners
   // see the parent's clients (sat_id="") and every satellite's clients
   // (sat_id=<sat_id>) in a single list.
@@ -4092,6 +4091,8 @@ void Reflector::sendNodeListToAllPeers(void)
   ReflectorTrunkManager::instance()->sendNodeList_geu(combined_udp);
   
 } /* Reflector::sendNodeListToAllPeers */
+
+
 
 
 void Reflector::onPeerNodeList(const std::string& peer_id,
