@@ -188,6 +188,66 @@ active QSO the fanout stays live indefinitely; on a TG that has been
 silent for ~10 minutes, the first PTT from a non-owner's client re-arms
 the fanout before the owner starts forwarding that TG back out.
 
+### Routable Prefixes (`ROUTABLE_PREFIXES`)
+
+Standard prefix routing requires either a direct `REMOTE_PREFIX` match or full-mesh
+connectivity.  `ROUTABLE_PREFIXES` (per `[TRUNK_x]` section, comma-separated) adds
+two complementary capabilities for hierarchical and non-full-mesh topologies.
+
+**Explicit prefixes** (e.g. `263`) are injected into `m_all_prefixes` at startup
+alongside `LOCAL_PREFIX` and all `REMOTE_PREFIX` values.  From that point they
+participate in longest-prefix-match just like native prefixes:
+
+- **Send / interest gate (`isSharedTG`).** When evaluating whether to forward a local
+  talker event or audio frame on a given trunk link, `isSharedTG` performs a
+  longest-prefix-match against the remote peer's combined prefix set (its
+  `REMOTE_PREFIX` plus its `ROUTABLE_PREFIXES`).  A TG that matches a routable
+  prefix on that link is forwarded toward the peer as if it matched `REMOTE_PREFIX`.
+- **Interest advertisement (`MsgPeerTgInterest`, type 129).** The same `isSharedTG`
+  gate controls which TGs are advertised in interest messages, so a routable TG's
+  interest reaches the next hop toward the owner without a PTT.
+- **Inbound accept gate.** On the receive side, `hasPrefixRoute(tg)` is true whenever
+  `m_all_prefixes` holds a prefix that matches the TG — including routable prefixes.
+  Combined with `isOwnedTG`, this covers accepting transit traffic for TGs this
+  reflector neither owns nor has as a direct `REMOTE_PREFIX`.
+- **Transit (`shouldRelayInbound` / `hasPrefixRoute`).** Because the routable prefix
+  is in `m_all_prefixes`, `hasPrefixRoute(tg)` returns true and
+  `shouldRelayInbound` triggers the gateway fanout arm, re-forwarding the frame via
+  `onLocal*` toward the actual owner.  Each intermediate hop in a chain must
+  declare the same routable prefix on its appropriate trunk; the declaration does
+  not propagate automatically.
+
+**`*` wildcard** is a zero-length default-route match.  It is treated as the
+lowest-precedence prefix — a real prefix always wins — and is **never** added to
+`m_all_prefixes`.  As a result:
+
+- `isSharedTG` admits via a `*`-configured link any TG not claimed by a longer
+  real prefix in `m_all_prefixes`, for local-client forwarding and interest
+  advertisement (a real prefix always wins over the zero-length wildcard).
+- `hasPrefixRoute` is **not** set for `*`-matched TGs, so `shouldRelayInbound` does
+  not trigger the gateway arm.  Wildcard-routed frames are delivered locally but
+  never transited between trunks.
+- The **return leg** to a `*`-leaf relies on peer interest: because `*` matches every
+  TG in the send/interest gate, the leaf advertises interest in the TG toward the
+  parent (`MsgPeerTgInterest`), and the parent's `isPeerInterestedTG` carries the
+  return audio back.  The leaf also accepts the returning audio via the wildcard match
+  (`matchesRoutable`) on its inbound-accept gate — because `*` is never added to
+  `m_all_prefixes`, `hasPrefixRoute` cannot serve this role, so the wildcard accept
+  is the mechanism that lets the leaf receive the return audio.
+
+A startup `WARNING` is emitted when `*` is set on a reflector with more than one
+trunk, as that is outside the intended single-uplink leaf pattern and may produce
+unexpected fanout behaviour.
+
+**Blacklist precedence.** `BLACKLIST_TGS` is evaluated before any routable prefix
+logic.  A blacklisted TG is dropped before `isSharedTG`, `hasPrefixRoute`, or
+interest advertisement are consulted.
+
+**Delegation note.** A routable prefix more specific than this reflector's own
+`LOCAL_PREFIX` intentionally delegates that sub-range elsewhere: longest-prefix-match
+honors it and the more specific routable prefix wins.  Point such a prefix at the
+reflector that actually owns those TGs.
+
 ### Cluster TGs
 
 Cluster TGs bypass prefix routing entirely.  A TG listed in `CLUSTER_TGS` is
@@ -661,17 +721,34 @@ The `/status` JSON endpoint includes a `trunks` object alongside `nodes`:
       "connected": true,
       "local_prefix": "1",
       "remote_prefix": "2",
+      "routable_prefixes": ["24"],
+      "routable_wildcard": false,
       "active_talkers": {
         "25": "SM0ABC",
         "200": "LA8PV"
       }
     }
+  },
+  "local_aliases": {
+    "8": { "alias": 2620008, "direction": "two-way" }
   }
 }
 ```
 
 `active_talkers` contains only TGs with an active remote talker at the moment
 of the request.  It is empty when no trunk conversations are in progress.
+
+`routable_prefixes` lists extra TG prefixes reachable *via* this peer (gateway
+routing) but not owned by it; `routable_wildcard` is `true` when the link is
+configured as a default (`*`) route.
+
+`local_aliases` is keyed by the short local TG and lists every configured
+`LOCAL_ALIASES` entry: `alias` is the long, mesh-routable number it is
+re-homed under, and `direction` is `"two-way"`, `"in"`, or `"out"` (see
+"Local aliases" below). Note that this is the *local* view — `active_talkers`
+above (and MQTT/Redis mirrors of it) report the long mesh number for aliased
+traffic, since that is the identity used for routing, while local clients
+experience the short number.
 
 ---
 
@@ -746,6 +823,72 @@ HOST=reflector-b.example.com
 SECRET=secret_bc
 REMOTE_PREFIX=2
 ```
+
+### Local aliases
+
+`LOCAL_ALIASES` (in `[GLOBAL]`) re-homes a short local TG under one of this
+reflector's own `LOCAL_PREFIX` values, so it gets a globally-unique number
+reachable from anywhere in the mesh while local users keep dialing the short
+number:
+
+```ini
+[GLOBAL]
+LOCAL_PREFIX=262
+LOCAL_ALIASES=8:2620008,9:2620009/out,4001:2620400/in
+```
+
+**Syntax.** Comma-separated entries of the form `localTG:aliasTG[/dir]`.
+`dir` is `in` or `out`; when omitted the alias is two-way.
+
+**Ownership rule.** `aliasTG` must fall under one of this reflector's
+`LOCAL_PREFIX` values (checked with the same longest-prefix match used for
+TG ownership everywhere else). An entry whose `aliasTG` is not owned is
+rejected at config load — logged as an error and skipped — so a typo can
+never claim a number the reflector doesn't own; the reflector still starts
+and the remaining valid entries take effect.
+
+**Direction semantics.**
+- **two-way** (no suffix): talk on the short local TG is exported to the
+  mesh under the long number, and traffic arriving from the mesh on the
+  long number is delivered to local clients on the short number.
+- **`/out`**: local talk is exported to the mesh under the long number, but
+  inbound mesh traffic on the long number is *not* folded back to the short
+  number — the alias is publish-only.
+- **`/in`**: mesh traffic on the long number is delivered locally on the
+  short number, but the short number is *not* exported to the mesh — the
+  alias is listen-only.
+
+**Rewrite-on-select.** A client — local or remote — that dials the long
+alias number directly is folded onto the short number as soon as it
+selects or monitors that TG, so `8` and `2620008` are always the same
+conversation locally; there is no way to end up split across both numbers
+on this reflector.
+
+The long number is thus *reserved* by redirection, not by refusal — and
+that is a constraint, not a preference. The reflector has no way to
+decline a TG selection: `handleSelectTG` always honors what the client
+asks for, and the protocol has no "selection denied" message. Adding one
+would not help either, because the client side is vanilla upstream
+svxlink and cannot be modified to react to a refusal — an operator would
+simply see a dead talk group with no explanation. Silently folding the
+selection onto the short number achieves the same goal (nobody can sit in
+a separate local room on the alias number) using only mechanisms the
+unmodified client already understands.
+
+**Routing on long, delivery on short.** The alias is a translation applied
+at the local-client / trunk-mesh boundary, not a rename. All prefix
+routing, owner-relay fan-out, and peer-interest bookkeeping run on the
+*long* number, because that is the identity the rest of the mesh sees and
+uses for longest-prefix-match. All local delivery and talker arbitration
+(which client currently holds the TG, PTT interruption, monitor filters,
+mute) run on the *short* number, because that is what local clients
+select and expect to see. One documented consequence: `/status.local_aliases`
+(above) is the local, short-keyed view of the mapping, but
+`/status.active_talkers` in a trunk's status block — and the equivalent
+MQTT/Redis mirrors — report the *long* mesh number while local clients are
+simultaneously experiencing the *short* number for the same transmission.
+This is intentional: it reflects the two identities (mesh-routing vs.
+local-delivery) the alias deliberately keeps separate.
 
 ---
 

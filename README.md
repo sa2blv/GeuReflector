@@ -10,6 +10,112 @@ Trunk extension by IW1GEU.
 
 ---
 
+## Contents
+
+- [New to SvxLink reflectors? Start here](#new-to-svxlink-reflectors-start-here)
+- [Quick start — one standalone reflector](#quick-start--one-standalone-reflector)
+- [Which setup fits my deployment?](#which-setup-fits-my-deployment)
+- [Why trunking?](#why-trunking)
+- [What it adds over SvxReflector](#what-it-adds-over-svxreflector)
+- [How TG ownership works](#how-tg-ownership-works)
+- [Build](#build) · [Testing](#testing) · [Configuration](#configuration)
+- [HTTP Status](#http-status) · [Live user/password reload](#live-userpassword-reload)
+- [Documentation](#documentation) · [License](#license)
+
+---
+
+## New to SvxLink reflectors? Start here
+
+If you already run SvxReflector, skip to [What it adds](#what-it-adds-over-svxreflector).
+Otherwise, here is the whole idea:
+
+- **SvxLink nodes** are radios (repeaters, hotspots, simplex links) connected to
+  the internet instead of to each other over RF.
+- A **reflector** is the central server those nodes connect to — it relays voice
+  between every node that is listening to the same channel, like a conference
+  bridge for radios.
+- A **talk group (TG)** is one of those channels, identified by a number. A node
+  picks a TG and hears everyone else on that TG.
+- Normally one reflector serves everyone. **GeuReflector lets you run several
+  reflectors and link them together** ("trunking"), so a talk group can span
+  multiple servers while each server stays independent.
+
+### Glossary
+
+| Term | Meaning |
+|------|---------|
+| **Node** | An SvxLink instance (a radio gateway). Connects to a reflector as a client. Unmodified by this fork. |
+| **Reflector** | The server that relays audio between nodes on the same talk group. |
+| **Talk group (TG)** | A numbered voice channel. One talker at a time per TG. |
+| **Trunk** | A persistent server-to-server link between two reflectors that carries shared TGs. |
+| **Prefix** | The leading digits of a TG number that decide which reflector *owns* it (e.g. prefix `262` owns TGs `262`, `2620`, `26299`…). |
+| **Cluster TG** | A TG broadcast to every trunked reflector regardless of prefix — like a nationwide channel. |
+| **Satellite** | A lightweight reflector that hangs off a parent instead of joining the full mesh (NAT-friendly). |
+| **Twin** | Two reflectors sharing one prefix as a high-availability pair, appearing as one peer to the mesh. |
+
+---
+
+## Quick start — one standalone reflector
+
+You do **not** need trunking to run GeuReflector. With no `[TRUNK_x]` sections it
+behaves exactly like stock SvxReflector, so the fastest way to see it working is
+a single server.
+
+1. **Write a config.** Start from the template
+   `src/svxlink/reflector/svxreflector.conf.in` — it has the `[GLOBAL]`,
+   certificate, `[USERS]`, and `[PASSWORDS]` sections. A minimal standalone
+   config (no trunking) looks like this:
+
+   ```ini
+   [GLOBAL]
+   LISTEN_PORT=5300
+   LOCAL_PREFIX=262          # optional for a single server; sets which TGs it "owns"
+
+   [SERVER_CERT]
+   COMMON_NAME=reflector.example.org   # REQUIRED — host name for the auto-generated TLS cert
+
+   [USERS]
+   MYNODE-1=MyNodes          # the callsign your SvxLink node logs in with
+
+   [PASSWORDS]
+   MyNodes="change-this-secret"
+   ```
+
+   `LOCAL_PREFIX` is the only GeuReflector-specific line; the rest is stock
+   SvxReflector. **`[SERVER_CERT] COMMON_NAME` is required** — without it the
+   reflector aborts at startup (*"SERVER_CERT/COMMON_NAME is unset"*). The
+   reflector auto-generates its own CA and server certificate on first run.
+
+2. **Build and run it.** See [`docs/INSTALL.md`](docs/INSTALL.md) to build from
+   source and run it as a service, or [`docs/DOCKER.md`](docs/DOCKER.md) to run
+   it in a container.
+
+3. **Connect a node.** Point an SvxLink node at this server (host + port 5300,
+   the callsign/password above), key up on a talk group, and watch the talker
+   appear in the logs. Enable `HTTP_SRV_PORT=8080` to see live state at
+   `http://<host>:8080/status`.
+
+Once one reflector works, [add trunk links](#4-add-a-trunk-section-per-peer) to
+connect it to others.
+
+---
+
+## Which setup fits my deployment?
+
+| Your situation | Setup | Where to look |
+|----------------|-------|---------------|
+| One reflector for a club or single site | Standalone (no trunks) | [Quick start](#quick-start--one-standalone-reflector) above |
+| Several regions in one country | Full trunk mesh | [Full-mesh example](#full-mesh-example--three-reflectors), [`docs/DEPLOYMENT_ITALY.md`](docs/DEPLOYMENT_ITALY.md) |
+| Many countries / a backbone | Full mesh + gateways + routable prefixes | [`docs/WW_DEPLOYMENT.md`](docs/WW_DEPLOYMENT.md), [Routable prefixes](#5-routable-prefixes--hierarchical-and-non-full-mesh-topologies-optional) |
+| Members behind NAT / no static IP | Satellites under a parent | [Satellite reflectors](#satellite-reflectors) |
+| Failover for a single reflector | Twin (HA) pair | [`docs/TWIN_PROTOCOL.md`](docs/TWIN_PROTOCOL.md) |
+
+For diagrams of each shape and a fuller decision guide, see
+[`docs/TOPOLOGY_EXAMPLES.md`](docs/TOPOLOGY_EXAMPLES.md). For *why* these pieces
+work the way they do, read [`docs/CONCEPTS.md`](docs/CONCEPTS.md).
+
+---
+
 ## Why trunking?
 
 A standard SvxReflector is a single centralized server. Without trunking, a
@@ -117,6 +223,28 @@ When a client on Reflector 1 joins TG 25, Reflector 1 forwards the conversation
 over its trunk to Reflector 2 (which owns the "2" prefix). Clients on both
 reflectors hear the same audio on TG 25 with no extra configuration.
 
+**Local numbering is the operator's choice — but routing follows the number.** A
+reflector does not force its nodes onto the prefix scheme; nodes may select *any*
+TG number. Routing is then decided **solely by longest-prefix-match on the number
+itself, regardless of its length**:
+
+- A number whose leading digits match a prefix **that some reflector in the
+  mesh actually owns** is routed to that owner — short or long, and even if the
+  match was unintended. If a reflector owns Italy's prefix `222`, then `22210`
+  routes to it; if another owns Germany's `262`, then `26201` routes there.
+- A number that matches **no** prefix has no owner: it works locally among that
+  reflector's own nodes (exactly like stock SvxReflector) but is **never sent
+  over a trunk** — it is invisible to the mesh and unreachable by international
+  traffic.
+
+So to keep a talk group **local**, pick a number that matches no mesh prefix
+(in a typical MCC scheme, countries occupy `200`–`799`, so short numbers like
+`1`–`199` usually stay local — but only because nothing owns that prefix). To be
+**reachable** internationally, use a TG under the agreed prefix scheme (your
+country's MCC — see [`docs/MCC_COUNTRY_CODES.md`](docs/MCC_COUNTRY_CODES.md)).
+Conversely, beware that a "local" number that happens to match a configured
+prefix *will* be sent to that owner.
+
 ---
 
 ## Build
@@ -126,7 +254,7 @@ Required by default (opt out with the CMake flags below): libmosquitto, libhired
 Optional codecs: libopus, libgsm, libspeex.
 
 ```bash
-cd geureflector
+cd GeuReflector
 cmake -S src -B build -DLOCAL_STATE_DIR=/var
 cmake --build build
 # binary at build/bin/svxreflector
@@ -146,17 +274,19 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for the full step-by-step.
 
 ## Testing
 
-Integration tests spin up a 3-reflector Docker mesh and verify trunk routing,
-audio delivery, and protocol behavior:
+Integration tests spin up Docker reflector meshes and verify trunk routing,
+audio delivery, twin failover, and protocol behavior:
 
 ```bash
 cd tests && bash run_tests.sh
 ```
 
-Requires Docker and Python 3.7+. The script builds the images, starts the mesh,
-runs 18 automated tests, then drops into an interactive prompt where you can
-enter any TG number and see which reflector it routes to (verified via container
-logs).
+Requires Docker and Python 3.7+. The script builds the images, starts the
+meshes, and runs 89 automated tests across six suites (trunk, MQTT deltas,
+satellite secrets, logging, twin, and routable prefixes). When run in a
+terminal, the trunk suite ends with an interactive prompt where you can enter
+any TG number and see which reflector it routes to (verified via container
+logs). See [`tests/TESTS.md`](tests/TESTS.md) for the full breakdown.
 
 The mesh topology is defined in `tests/topology.py` — edit prefixes, cluster
 TGs, or add reflectors there, and `run_tests.sh` regenerates all configs
@@ -252,6 +382,114 @@ the link. Both sysops must agree on a shared section name before configuring the
 link. For example, if reflectors A and B want to link, both configs must use the
 same name (e.g. `[TRUNK_AB]`). A connection from a peer whose section name does
 not match any local section will be rejected.
+
+**International naming standard.** For links between countries, name the section
+`TRUNK_<ISO>_<ISO>` using each country's ISO 3166-1 alpha-2 code, with the two
+codes in **alphabetical order**:
+
+```ini
+# Germany (DE) <-> France (FR): "DE" sorts before "FR"
+[TRUNK_DE_FR]
+
+# Italy (IT) <-> Germany (DE): alphabetical -> DE before IT
+[TRUNK_DE_IT]
+```
+
+Alphabetical order makes the name deterministic, so both sysops independently
+arrive at the *same* section name with no "my country goes first" dispute. (For
+sub-national links, any agreed-upon shared name works — see
+[`docs/WW_DEPLOYMENT.md`](docs/WW_DEPLOYMENT.md) for the full international
+convention.)
+
+### 5. Routable prefixes — hierarchical and non-full-mesh topologies (optional)
+
+In a standard full mesh every pair of reflectors has a direct trunk link, so
+each reflector can reach any TG via `REMOTE_PREFIX` alone.  Some deployments
+cannot or should not use a full mesh:
+
+- A **regional leaf** with a single uplink to a national backbone has no
+  direct path to sibling regions — it needs a default route via the parent.
+- A **transit backbone** node between two meshes may carry traffic for prefix
+  groups it does not own and that are not adjacent in `REMOTE_PREFIX`.
+
+`ROUTABLE_PREFIXES` (per `[TRUNK_x]` section, comma-separated) declares
+additional TG prefixes that are reachable *via* this peer beyond what
+`REMOTE_PREFIX` already covers.
+
+**Explicit prefixes** (e.g. `208`) extend the mesh-wide prefix set so the
+reflector will accept those TGs inbound and transit them onward toward the
+owner via the existing gateway fanout (`shouldRelayInbound`).  Each intermediate
+hop along a chain must declare the routable prefix on the appropriate trunk
+— there is no automatic propagation.
+
+**`*` wildcard** acts as a default route for a single-uplink regional leaf: local
+clients can reach any TG via that uplink, and the return audio is accepted back.
+`*` is never relayed between trunks (loop-safe) and is not added to the
+mesh-wide prefix set, so it is invisible to gateway forwarding.  A `*` is a
+zero-length, lowest-precedence match — it never overrides a real prefix.  A
+startup `WARNING` is logged when `*` is set on a reflector that has more than
+one trunk, since that topology is outside the intended single-uplink leaf
+pattern.
+
+**Blacklist precedence:** `BLACKLIST_TGS` is evaluated before any routable
+logic — a blacklisted TG is never forwarded, accepted, or advertised as
+interest, regardless of `ROUTABLE_PREFIXES`.
+
+**Delegation note:** a routable prefix more specific than this reflector's own
+`LOCAL_PREFIX` intentionally delegates that sub-range elsewhere
+(longest-prefix-match: the more specific routable prefix wins).  Point such a
+prefix at the reflector that actually owns those TGs.
+
+**Runtime note:** the mesh-wide prefix set used for transit is built at startup,
+so changing `ROUTABLE_PREFIXES` takes full effect on reflector restart (as with
+`REMOTE_PREFIX`).
+
+Example — a chain where an Italian regional leaf (prefix `222100`) needs to
+reach a French TG `208xx` (owned by **FR**, prefix `208`), transiting through
+**IT** national (`222`) and **DE** national (`262`). IT is not directly meshed
+with FR; it reaches FR over its DE trunk. Section names follow the
+[international standard](#4-add-a-trunk-section-per-peer): `TRUNK_<ISO>_<ISO>`,
+ISO codes alphabetical.
+
+```ini
+# On the Italian regional leaf (prefix 222100) — single uplink to IT national.
+# Sub-national link, so any agreed shared name works (section 4). The leaf uses
+# '*' as a default route to reach everything via its one uplink.
+[TRUNK_IT_NORDOVEST]
+HOST=it.example.org
+SECRET=secret_it_nordovest
+REMOTE_PREFIX=222
+ROUTABLE_PREFIXES=*
+
+# On IT national (prefix 222) — reach FR (208) via the link to DE.
+# International link → TRUNK_<ISO>_<ISO>, alphabetical: DE before IT.
+[TRUNK_DE_IT]
+HOST=de.example.org
+SECRET=secret_de_it
+REMOTE_PREFIX=262
+ROUTABLE_PREFIXES=208
+
+# On DE national (prefix 262) — the SAME [TRUNK_DE_IT] link, return path for 208.
+# The section name MUST be identical on both ends of a link (section 4).
+[TRUNK_DE_IT]
+HOST=it.example.org
+SECRET=secret_de_it
+REMOTE_PREFIX=222
+ROUTABLE_PREFIXES=208
+
+# On DE national — trunk to FR national.
+[TRUNK_DE_FR]
+HOST=fr.example.org
+SECRET=secret_de_fr
+REMOTE_PREFIX=208
+# FR owns 208 natively — no ROUTABLE_PREFIXES needed on this last hop
+```
+
+The `*` wildcard on the leaf's uplink also handles the return leg: the leaf
+advertises interest in `208xx` toward IT via `MsgPeerTgInterest`, and — on top
+of that — accepts the returning audio via the wildcard match (`matchesRoutable`)
+on its inbound-accept gate, since `*` is excluded from the mesh prefix set and
+`hasPrefixRoute` alone cannot serve this role.
 
 ### Network requirements
 
@@ -459,7 +697,7 @@ static configuration in a single response:
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.3.99.13+trunk.twin2",
   "mode": "reflector",
   "local_prefix": ["1"],
   "listen_port": "5300",
@@ -554,6 +792,9 @@ The PTY path is set by `COMMAND_PTY` in `[GLOBAL]` (default
 
 ## Documentation
 
+- [`docs/CONCEPTS.md`](docs/CONCEPTS.md) — **start here after the glossary**: how
+  TG ownership, owner-relay, peer interest, cluster TGs, and talker arbitration
+  fit together, with a worked three-way-QSO example
 - [`docs/INSTALL.md`](docs/INSTALL.md) — how to build and install GeuReflector
   as a drop-in replacement for an existing SvxReflector installation
 - [`docs/DOCKER.md`](docs/DOCKER.md) — running GeuReflector in a Docker container
@@ -561,6 +802,9 @@ The PTY path is set by `COMMAND_PTY` in `[GLOBAL]` (default
 - [`docs/PEER_PROTOCOL.md`](docs/PEER_PROTOCOL.md) — full wire protocol
   specification: message format, handshake sequence, talker arbitration
   tie-breaking, heartbeat, and the complete message type table
+- [`docs/TWIN_PROTOCOL.md`](docs/TWIN_PROTOCOL.md) — twin (HA-pair) protocol:
+  shared-prefix pairing, sticky per-transmission socket selection, failover,
+  cross-twin arbitration, and the external-peer `PAIRED=1` requirement
 - [`docs/TOPOLOGY_EXAMPLES.md`](docs/TOPOLOGY_EXAMPLES.md) — visual
   cookbook of the five supported topology shapes (international
   full-mesh, national mesh joined at gateway, satellite tree, hybrid,
@@ -572,6 +816,9 @@ The PTY path is set by `COMMAND_PTY` in `[GLOBAL]` (default
   in Italian
 - [`docs/WW_DEPLOYMENT.md`](docs/WW_DEPLOYMENT.md) — worldwide deployment
   example (25 countries, full mesh, DMR MCC-based TG numbering)
+- [`docs/MCC_COUNTRY_CODES.md`](docs/MCC_COUNTRY_CODES.md) — reference table of
+  3-digit Mobile Country Codes (ITU E.212) for anchoring `LOCAL_PREFIX` on your
+  country's MCC
 - [`docs/MQTT.md`](docs/MQTT.md) — MQTT publishing: topic structure, payload
   format, configuration reference, and TLS setup
 - [`docs/REDIS.md`](docs/REDIS.md) — Redis-backed config store: schema,
@@ -579,6 +826,9 @@ The PTY path is set by `COMMAND_PTY` in `[GLOBAL]` (default
 - [`docs/LOGGING.md`](docs/LOGGING.md) — leveled, per-subsystem,
   live-reloadable logger: `LOG=` config, PTY commands, Docker vs.
   `--logfile` deployments, migration from `TRUNK_DEBUG`
+- [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) — symptom-first checklists
+  for trunks that won't connect, audio that won't cross, satellite/twin issues,
+  and flapping links
 - [`docs/MESSAGING_IDEAS.md`](docs/MESSAGING_IDEAS.md) — ideas for consuming
   MQTT events via Telegram, SMS, Discord, webhooks, dashboards, and more
 - [`docs/DESIGN_SATELLITE_AND_CLUSTER.md`](docs/DESIGN_SATELLITE_AND_CLUSTER.md) — design
