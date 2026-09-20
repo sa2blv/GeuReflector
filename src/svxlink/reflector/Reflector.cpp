@@ -5982,32 +5982,32 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
 
         }
+		if (header_v3.talker_status == 4)
+		{
+		    header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, addr.toString());
+		
+		    cout << header_v3.talker << " -> Trunk " << addr.toString() << ": Request QSY FROM TG #" << header_v3.tg << " to " << header_v3.new_tg << endl;
+		
+		    broadcastMsg(MsgRequestQsy(header_v3.new_tg),
+		        ReflectorClient::mkAndFilter(
+		            ge_v2_client_filter,
+		            ReflectorClient::TgFilter(header_v3.tg)));
+		
+		    ss.seekg(0);
+		    ReflectorTrunkManager::instance()->handleOutgoingAudio_resend(header_v3.tg, ss, addr.toString());
+		}
 
-
-        //Remote QSY STAUTS 
-        if (header_v3.talker_status == 4)
-        {
-
-            cout << header_v3.talker << " -> Trunk " << addr.toString() << ": Request QSY FROM TG #" << header_v3.tg << " to " << header_v3.new_tg << endl;
-
-            broadcastMsg(MsgRequestQsy(header_v3.new_tg),
-                ReflectorClient::mkAndFilter(
-                    ge_v2_client_filter,
-                    ReflectorClient::TgFilter(header_v3.tg)));
-
-            ss.seekg(0);
-
-            ReflectorTrunkManager::instance()->handleOutgoingAudio_resend(header_v3.tg, ss, addr.toString());
-
-        }
+		
         //Remote flush
         if (header_v3.talker_status == 5)
         {
 
-            broadcastUdpMsg(MsgUdpFlushSamples(),
-                ReflectorClient::mkAndFilter(
-                    ReflectorClient::TgFilter(header_v3.tg),
-                    ReflectorClient::TgFilter(header_v3.tg)));
+	   		 header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, addr.toString());
+	
+	    	broadcastUdpMsg(MsgUdpFlushSamples(),
+	        ReflectorClient::mkAndFilter(
+            ReflectorClient::TgFilter(header_v3.tg),
+            ReflectorClient::TgFilter(header_v3.tg)));
 
 
             ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_status_newmsg(header_v3.tg, header_v3, addr.toString());
