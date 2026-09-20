@@ -5994,7 +5994,7 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 		            ReflectorClient::TgFilter(header_v3.tg)));
 		
 		    ss.seekg(0);
-		    ReflectorTrunkManager::instance()->handleOutgoingAudio_resend(header_v3.tg, ss, addr.toString());
+    ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_status_newmsg(header_v3.tg, header_v3, addr.toString());
 		}
 
 		
