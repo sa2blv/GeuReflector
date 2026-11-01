@@ -874,9 +874,16 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
     return;
   }
 
+  if (!TGHandler::instance()->qsyEnableForTG(current_tg))
+  {
+    geulog::info("client", client->callsign(),
+              ": QSY disabled for TG #", current_tg, " (QSY_ENABLE=0)");
+    return;
+  }
+
   if (tg == 0)
   {
-    tg = nextRandomQsyTg();
+    tg = nextRandomQsyTg(current_tg);
     if (tg == 0) { return; }
   }
 
@@ -2498,7 +2505,7 @@ void Reflector::httpClientDisconnected(Async::HttpServerConnection *con,
 
 void Reflector::onRequestAutoQsy(uint32_t from_tg)
 {
-  uint32_t tg = nextRandomQsyTg();
+  uint32_t tg = nextRandomQsyTg(from_tg);
   if (tg == 0) { return; }
 
   geulog::info("core", "Requesting auto-QSY from TG #", from_tg,
@@ -2520,8 +2527,27 @@ void Reflector::onRequestAutoQsy(uint32_t from_tg)
 } /* Reflector::onRequestAutoQsy */
 
 
-uint32_t Reflector::nextRandomQsyTg(void)
+uint32_t Reflector::nextRandomQsyTg(uint32_t from_tg)
 {
+  // Preferred: explicit QSY_TGS pool (per-TG then GLOBAL), mixed list/range
+  // "x,x-x,x". Picks the first TG in the pool that currently has no clients.
+  // When QSY_TGS is not configured, fall back to the legacy RANDOM_QSY_RANGE
+  // logic below (byte-identical old behaviour).
+  std::vector<uint32_t> pool = TGHandler::instance()->qsyTgsForTG(from_tg);
+  if (!pool.empty())
+  {
+    for (uint32_t cand : pool)
+    {
+      if ((cand != 0) && (cand != from_tg) &&
+          TGHandler::instance()->clientsForTG(cand).empty())
+      {
+        return cand;
+      }
+    }
+    geulog::warn("core", "No free TG available in QSY_TGS for QSY");
+    return 0;
+  }
+
   if (m_random_qsy_tg == 0)
   {
     geulog::warn("core", "QSY request for random TG "
@@ -2865,7 +2891,7 @@ void Reflector::ctrlPtyDataReceived(const void *buf, size_t count)
     }
     if (!(ss >> to_tg) || (to_tg == 0))
     {
-      to_tg = nextRandomQsyTg();
+      to_tg = nextRandomQsyTg(from_tg);
       if (to_tg == 0)
       {
         errss << "No TG given and no random QSY TG available "

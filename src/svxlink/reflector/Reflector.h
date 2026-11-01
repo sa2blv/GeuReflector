@@ -624,7 +624,7 @@ class Reflector : public sigc::trackable
     void httpClientDisconnected(Async::HttpServerConnection *con,
         Async::HttpServerConnection::DisconnectReason reason);
     void onRequestAutoQsy(uint32_t from_tg);
-    uint32_t nextRandomQsyTg(void);
+    uint32_t nextRandomQsyTg(uint32_t from_tg = 0);
     void ctrlPtyDataReceived(const void *buf, size_t count);
     void cfgUpdated(const std::string& section, const std::string& tag);
     void onTrunkTalkerUpdated(uint32_t tg, std::string old_cs,

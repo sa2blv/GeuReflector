@@ -34,6 +34,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <cassert>
 #include <algorithm>
 #include <sstream>
+#include <vector>
 #include <regex>
 #include <cctype>
 #include <Log.h>
@@ -172,9 +173,8 @@ bool TGHandler::switchTo(ReflectorClient *client, uint32_t tg)
         return false;
       }
       tg_info = new TGInfo(tg);
-      std::ostringstream ss;
-      ss << "TG#" << tg;
-      m_cfg->getValue(ss.str(), "AUTO_QSY_AFTER", tg_info->auto_qsy_after_s);
+      // Per-TG AUTO_QSY_AFTER, else GLOBAL (was per-TG only before).
+      tg_info->auto_qsy_after_s = autoQsyAfterForTG(tg);
       m_id_map[tg] = tg_info;
     }
     tg_info->clients.insert(client);
@@ -240,7 +240,7 @@ void TGHandler::setTalkerForTG(uint32_t tg, ReflectorClient* new_talker)
   }
   talkerUpdated(tg, old_talker, new_talker);
 
-  if (tg_info->auto_qsy_after_s > 0)
+  if ((tg_info->auto_qsy_after_s > 0) && autoQsyEnabledForTG(tg_info->id))
   {
     time_t now = time(NULL);
     if ((new_talker == 0) && (now > tg_info->auto_qsy_time))
@@ -546,6 +546,44 @@ namespace {
     }
     return false;
   }
+
+  // Expand a mixed TG list ("91,240,300-310") into explicit, sorted, de-duped
+  // TGs. Ranges are capped so a huge span cannot explode memory. Used for the
+  // QSY target pool (QSY_TGS). Malformed tokens are skipped (never throws).
+  std::vector<uint32_t> fdx_expand_list(const std::string& list)
+  {
+    static const size_t MAX_EXPAND = 20000;
+    std::set<uint32_t> out;
+    std::string tok;
+    std::istringstream ss(list);
+    while (std::getline(ss, tok, ','))
+    {
+      tok.erase(std::remove_if(tok.begin(), tok.end(),
+            [](unsigned char c){ return std::isspace(c); }), tok.end());
+      if (tok.empty()) { continue; }
+      std::size_t dash = tok.find('-');
+      try
+      {
+        if (dash == std::string::npos)
+        {
+          out.insert(static_cast<uint32_t>(std::stoul(tok)));
+        }
+        else
+        {
+          uint32_t lo = static_cast<uint32_t>(std::stoul(tok.substr(0, dash)));
+          uint32_t hi = static_cast<uint32_t>(std::stoul(tok.substr(dash + 1)));
+          if (lo > hi) { std::swap(lo, hi); }
+          for (uint32_t t = lo; (t <= hi) && (out.size() < MAX_EXPAND); ++t)
+          {
+            out.insert(t);
+          }
+        }
+      }
+      catch (...) { /* skip malformed token */ }
+      if (out.size() >= MAX_EXPAND) { break; }
+    }
+    return std::vector<uint32_t>(out.begin(), out.end());
+  }
 } /* anonymous namespace */
 
 
@@ -580,6 +618,80 @@ bool TGHandler::fullDuplexForTG(uint32_t tg) const
   // 4) Default: half-duplex (legacy single-talker, unchanged).
   return false;
 } /* TGHandler::fullDuplexForTG */
+
+
+bool TGHandler::qsyBoolForTG(uint32_t tg, const char* key, bool def) const
+{
+  if (m_cfg == nullptr) { return def; }
+    // Per-TG value overrides the GLOBAL default; neither set -> def.
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool v = def;
+  if (m_cfg->getValue(ss.str(), key, v)) { return v; }
+  if (m_cfg->getValue("GLOBAL", key, v)) { return v; }
+  return def;
+} /* TGHandler::qsyBoolForTG */
+
+
+time_t TGHandler::autoQsyAfterForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return 0; }
+    // Per-TG value overrides the GLOBAL default; neither set -> 0 (disabled).
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  time_t after = 0;
+  if (m_cfg->getValue(ss.str(), "AUTO_QSY_AFTER", after)) { return after; }
+  after = 0;
+  m_cfg->getValue("GLOBAL", "AUTO_QSY_AFTER", after);
+  return after;
+} /* TGHandler::autoQsyAfterForTG */
+
+
+bool TGHandler::autoQsyEnabledForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return false; }
+    // Explicit AUTO_QSY (per-TG then GLOBAL) wins. When neither is set, keep
+    // the legacy behaviour: auto QSY is active whenever an AUTO_QSY_AFTER
+    // time is configured. This preserves existing setups byte-for-byte.
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool v = true;
+  if (m_cfg->getValue(ss.str(), "AUTO_QSY", v)) { return v; }
+  if (m_cfg->getValue("GLOBAL", "AUTO_QSY", v)) { return v; }
+  return autoQsyAfterForTG(tg) > 0;
+} /* TGHandler::autoQsyEnabledForTG */
+
+
+bool TGHandler::qsyEnableForTG(uint32_t tg) const
+{
+  return qsyBoolForTG(tg, "QSY_ENABLE", true);
+} /* TGHandler::qsyEnableForTG */
+
+
+bool TGHandler::qsyFollowForTG(uint32_t tg) const
+{
+  return qsyBoolForTG(tg, "QSY_FOLLOW", true);
+} /* TGHandler::qsyFollowForTG */
+
+
+std::vector<uint32_t> TGHandler::qsyTgsForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return {}; }
+    // Per-TG QSY_TGS overrides GLOBAL; neither set -> empty (caller uses
+    // the legacy RANDOM_QSY_RANGE).
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  std::string list;
+  if (m_cfg->getValue(ss.str(), "QSY_TGS", list) && !list.empty())
+  {
+    return fdx_expand_list(list);
+  }
+  if (m_cfg->getValue("GLOBAL", "QSY_TGS", list) && !list.empty())
+  {
+    return fdx_expand_list(list);
+  }
+  return {};
+} /* TGHandler::qsyTgsForTG */
 
 
 /****************************************************************************

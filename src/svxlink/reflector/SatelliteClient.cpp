@@ -349,6 +349,14 @@ void SatelliteClient::handleMsgPeerQsy(std::istream& is)
   if (!msg.unpack(is)) return;
   geulog::info("satellite", "Parent requests QSY TG #", msg.fromTg(),
                " -> TG #", msg.toTg());
+  // QSY_FOLLOW (per-TG then GLOBAL) decides whether we honour a QSY that
+  // arrives from the mesh. Default on = unchanged behaviour.
+  if (!TGHandler::instance()->qsyFollowForTG(msg.fromTg()))
+  {
+    geulog::info("satellite", "Ignoring mesh QSY for TG #", msg.fromTg(),
+                 " (QSY_FOLLOW=0)");
+    return;
+  }
   // our own clients on the TG, and our satellites
   m_reflector->qsyTg(msg.fromTg(), msg.toTg());
 } /* SatelliteClient::handleMsgPeerQsy */

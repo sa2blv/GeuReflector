@@ -22,6 +22,25 @@ TG_FOR_V1_CLIENTS=999
 #CLUSTER_TGS=222,2221,91
 #RANDOM_QSY_RANGE=12399:100
 #
+# --- QSY (automatic + requested talk-group change) -----------------------
+# All keys below may be set in [GLOBAL] and overridden per talk group in a
+# [TG#<n>] section (per-TG wins). Nothing set == legacy behaviour unchanged.
+#   AUTO_QSY        1/0 enable idle auto-QSY. Unset = legacy rule: auto-QSY is
+#                   active whenever AUTO_QSY_AFTER>0.
+#   AUTO_QSY_AFTER  seconds of idle before an automatic QSY (0 = disabled).
+#                   Now resolved per-TG then GLOBAL (was per-TG only).
+#   QSY_ENABLE      1/0 honour a client/DTMF-requested QSY (default 1).
+#   QSY_FOLLOW      1/0 honour a QSY received from the mesh/parent (default 1).
+#   QSY_TGS         allowed QSY target pool as a mixed list/range, e.g.
+#                   "240,300-310,91". Used for auto-QSY and the 92#/random
+#                   QSY (92<tg># targets an explicit TG, not limited to this
+#                   pool). When unset, RANDOM_QSY_RANGE above is used instead.
+#AUTO_QSY=1
+#AUTO_QSY_AFTER=300
+#QSY_ENABLE=1
+#QSY_FOLLOW=1
+#QSY_TGS=240,300-310,91
+#
 # --- Full-duplex talk groups (per-TG audio conference mixing) ------------
 # Default is half-duplex (legacy single-talker) everywhere; nothing below
 # set == byte-identical old behaviour. A full-duplex TG mixes all talkers so
@@ -97,7 +116,11 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #SM3XYZ="A strong password"
 
 #[TG#9999]
+#AUTO_QSY=1
 #AUTO_QSY_AFTER=300
+#QSY_ENABLE=1
+#QSY_FOLLOW=1
+#QSY_TGS=300-305
 #ALLOW=S[A-M]\\\\d.*|LA8PV
 #ALLOW_MONITOR=S[A-M]3.*
 #SHOW_ACTIVITY=0
