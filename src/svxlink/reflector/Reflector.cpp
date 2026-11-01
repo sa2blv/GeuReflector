@@ -883,11 +883,10 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
   geulog::info("client", client->callsign(), ": Requesting QSY from TG #",
        current_tg, " to TG #", tg);
 
-  broadcastMsg(MsgRequestQsy(tg),
-      ReflectorClient::mkAndFilter(
-        ge_v2_client_filter,
-        ReflectorClient::TgFilter(current_tg)));
-        
+  // Local clients on current_tg + any satellites carrying it.
+  qsyTg(current_tg, tg);
+
+    // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
     msg_trunk.talker_status = 4;
     msg_trunk.tg = current_tg;
@@ -895,10 +894,30 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
     msg_trunk.talker = client->callsign();
 
     ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(current_tg, msg_trunk);
-    
-    
-        
+
+
+
 } /* Reflector::requestQsy */
+
+
+void Reflector::qsyTg(uint32_t from_tg, uint32_t to_tg)
+{
+  if ((from_tg == 0) || (to_tg == 0) || (from_tg == to_tg))
+  {
+    return;
+  }
+
+  broadcastMsg(MsgRequestQsy(to_tg),
+      ReflectorClient::mkAndFilter(
+        ge_v2_client_filter,
+        ReflectorClient::TgFilter(from_tg)));
+
+  // Clients on satellites never see MsgRequestQsy: tell the satellites
+  for (const auto& kv : m_satellite_con_map)
+  {
+    kv.second->sendQsy(from_tg, to_tg);
+  }
+} /* Reflector::qsyTg */
 
 
 Async::SslCertSigningReq
@@ -2485,11 +2504,10 @@ void Reflector::onRequestAutoQsy(uint32_t from_tg)
   geulog::info("core", "Requesting auto-QSY from TG #", from_tg,
             " to TG #", tg);
 
-  broadcastMsg(MsgRequestQsy(tg),
-      ReflectorClient::mkAndFilter(
-        ge_v2_client_filter,
-        ReflectorClient::TgFilter(from_tg)));
-        
+  // Local clients on from_tg + any satellites carrying it.
+  qsyTg(from_tg, tg);
+
+    // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
     msg_trunk.talker_status = 4;
     msg_trunk.tg = from_tg;
@@ -2836,13 +2854,43 @@ void Reflector::ctrlPtyDataReceived(const void *buf, size_t count)
       }
     }
   }
+  else if (cmd == "QSY")
+  {
+    uint32_t from_tg = 0, to_tg = 0;
+    if (!(ss >> from_tg) || (from_tg == 0))
+    {
+      errss << "Invalid QSY PTY command '" << cmdline << "'. "
+               "Usage: QSY <from TG> [<to TG>]";
+      goto write_status;
+    }
+    if (!(ss >> to_tg) || (to_tg == 0))
+    {
+      to_tg = nextRandomQsyTg();
+      if (to_tg == 0)
+      {
+        errss << "No TG given and no random QSY TG available "
+                 "(GLOBAL/RANDOM_QSY_RANGE)";
+        goto write_status;
+      }
+    }
+    if (to_tg == from_tg)
+    {
+      errss << "QSY to the same TG #" << from_tg;
+      goto write_status;
+    }
+    geulog::info("core", "PTY: QSY from TG #", from_tg, " to TG #", to_tg);
+    qsyTg(from_tg, to_tg);
+    m_cmd_pty->write("QSY: TG #" + std::to_string(from_tg) + " -> TG #" +
+                     std::to_string(to_tg) + "\n");
+  }
   else
   {
-    errss << "Valid commands are: CFG, NODE, CA, TRUNK, LOG\n"
+    errss << "Valid commands are: CFG, NODE, CA, QSY, TRUNK, LOG\n"
           << "Usage:\n"
           << "CFG <section> <tag> <value>\n"
           << "NODE BLOCK <callsign> <blocktime seconds>\n"
           << "CA LS|LSC|LSP|SIGN <callsign>|RM <callsign>\n"
+          << "QSY <from TG> [<to TG>]\n"
           << "TRUNK MUTE|UNMUTE <section> <callsign>\n"
           << "TRUNK RELOAD [<section>]\n"
           << "TRUNK STATUS [<section>]\n"
@@ -3467,6 +3515,7 @@ void Reflector::satelliteDisconnected(Async::FramedTcpConnection* con,
     delete it->second;
     m_satellite_con_map.erase(it);
     publishMetaToRedis();
+    scheduleTgInterestUpdate();
   }
 } /* Reflector::satelliteDisconnected */
 
@@ -3505,6 +3554,7 @@ void Reflector::processSatelliteCleanup(Async::Timer* t)
     }
     delete link;
     m_satellite_con_map.erase(con);
+    scheduleTgInterestUpdate();
     con->disconnect();
     publishMetaToRedis();
   }
@@ -4428,9 +4478,23 @@ void Reflector::scheduleTgInterestUpdate(void)
 
 
 
+  // TGs our satellites monitor (MsgPeerTgInterest), e.g. a satellite
+  // reflector's clients or a PBX's calls, count as local interest too.
+  for (const auto& kv : m_satellite_con_map)
+  {
+    if (kv.second == nullptr || !kv.second->isAuthenticated()) continue;
+    const auto& sat = kv.second->tgInterest();
+    local_interest.insert(sat.begin(), sat.end());
+  }
+
   for (auto* link : m_trunk_links)
   {
     link->scheduleTgInterestRefresh(local_interest);
+  }
+  // Satellite mode: tell the parent what we (and our satellites) monitor.
+  if (m_satellite_client != nullptr)
+  {
+    m_satellite_client->sendTgInterest(local_interest);
   }
 } /* Reflector::scheduleTgInterestUpdate */
 

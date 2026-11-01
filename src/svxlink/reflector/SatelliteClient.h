@@ -1,6 +1,7 @@
 #ifndef SATELLITE_CLIENT_INCLUDED
 #define SATELLITE_CLIENT_INCLUDED
 
+#include <set>
 #include <string>
 #include <vector>
 #include <sigc++/sigc++.h>
@@ -51,6 +52,9 @@ class SatelliteClient : public sigc::trackable
     void sendClientConnected(const std::string& callsign, uint32_t tg,
                              const std::string& ip);
     void sendClientDisconnected(const std::string& callsign);
+    // TGs this reflector's clients (and satellites) monitor, sent up to the
+    // parent as MsgPeerTgInterest so it can advertise them to its trunks.
+    void sendTgInterest(const std::set<uint32_t>& tgs);
     void sendClientRx(const std::string& callsign,
                       const std::string& rx_json);
     void sendClientStatus(const std::string& callsign,
@@ -77,6 +81,7 @@ class SatelliteClient : public sigc::trackable
     uint16_t        m_parent_port;
     std::string     m_secret;
     std::string     m_satellite_id;
+    std::set<uint32_t> m_tg_interest;
     uint32_t        m_priority;
     bool            m_hello_received;
     FramedTcpClient m_con;
@@ -108,6 +113,7 @@ class SatelliteClient : public sigc::trackable
     void handleMsgPeerClientDisconnected(std::istream& is);
     void handleMsgPeerClientRx(std::istream& is);
     void handleMsgPeerClientStatus(std::istream& is);
+    void handleMsgPeerQsy(std::istream& is);
     void sendMsg(const ReflectorMsg& msg);
     void sendFilter(void);
     void heartbeatTick(Async::Timer* t);

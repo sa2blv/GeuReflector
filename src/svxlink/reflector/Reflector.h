@@ -225,6 +225,17 @@ class Reflector : public sigc::trackable
      */
     void requestQsy(ReflectorClient *client, uint32_t tg);
 
+    /**
+     * @brief   QSY all users of a talk group to another one
+     * @param   from_tg The talk group to leave
+     * @param   to_tg   The talk group to go to
+     *
+     * Directly connected clients on from_tg get MsgRequestQsy, satellites
+     * whose filter passes from_tg get MsgPeerQsy. Peter's UDP-trunk QSY
+     * announce (talker_status=4) is kept separately in the callers.
+     */
+    void qsyTg(uint32_t from_tg, uint32_t to_tg);
+
     Async::EncryptedUdpSocket* udpSocket(void) const { return m_udp_sock; }
 
     uint32_t randomQsyLo(void) const { return m_random_qsy_lo; }

@@ -251,6 +251,9 @@ void SatelliteLink::onFrameReceived(FramedTcpConnection* con,
     case MsgPeerFilter::TYPE:
       handleMsgPeerFilter(ss);
       break;
+    case MsgPeerTgInterest::TYPE:
+      handleMsgPeerTgInterest(ss);
+      break;
     case MsgPeerNodeList::TYPE:
       handleMsgPeerNodeList(ss);
       break;
@@ -524,6 +527,57 @@ bool SatelliteLink::filterPassesTg(uint32_t tg) const
   if (m_tg_filter.empty()) return true;
   return m_tg_filter.matches(tg);
 } /* SatelliteLink::filterPassesTg */
+
+
+void SatelliteLink::handleMsgPeerTgInterest(std::istream& is)
+{
+  MsgPeerTgInterest msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite", "Failed to unpack MsgPeerTgInterest from '",
+                  m_satellite_id, "'");
+    return;
+  }
+  if (!m_hello_received)
+  {
+    return;
+  }
+
+  // A satellite monitors a handful of TGs; cap the set so a misbehaving
+  // peer cannot blow up the trunk interest advertisements.
+  static const size_t MAX_SAT_INTEREST = 1000;
+  std::set<uint32_t> tgs;
+  for (uint32_t tg : msg.tgs())
+  {
+    if (tg == 0) continue;
+    if (tgs.size() >= MAX_SAT_INTEREST) break;
+    tgs.insert(tg);
+  }
+  if (tgs == m_tg_interest)
+  {
+    return;   // periodic refresh, nothing changed
+  }
+  m_tg_interest.swap(tgs);
+  std::ostringstream os;
+  for (uint32_t tg : m_tg_interest)
+  {
+    os << (os.tellp() > 0 ? "," : "") << tg;
+  }
+  geulog::info("satellite", "Satellite '", m_satellite_id,
+               "': monitors TGs ", m_tg_interest.empty() ? "(none)" : os.str());
+  m_reflector->scheduleTgInterestUpdate();
+} /* SatelliteLink::handleMsgPeerTgInterest */
+
+
+void SatelliteLink::sendQsy(uint32_t from_tg, uint32_t to_tg)
+{
+  if (!m_hello_received) return;
+  // Only satellites that carry the TG being left
+  if (!filterPassesTg(from_tg)) return;
+  geulog::info("satellite", "Satellite '", m_satellite_id, "': QSY TG #",
+               from_tg, " -> TG #", to_tg);
+  sendMsg(MsgPeerQsy(from_tg, to_tg));
+} /* SatelliteLink::sendQsy */
 
 
 void SatelliteLink::handleMsgPeerNodeList(std::istream& is)

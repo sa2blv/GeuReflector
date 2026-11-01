@@ -65,6 +65,7 @@ class SatelliteLink : public sigc::trackable
     void sendClientConnected(const std::string& callsign, uint32_t tg,
                              const std::string& ip);
     void sendClientDisconnected(const std::string& callsign);
+    void sendQsy(uint32_t from_tg, uint32_t to_tg);
     void sendClientRx(const std::string& callsign,
                       const std::string& rx_json);
     void sendClientStatus(const std::string& callsign,
@@ -84,6 +85,11 @@ class SatelliteLink : public sigc::trackable
     // which lack an inline TG and must look it up externally.
     bool filterPassesTg(uint32_t tg) const;
 
+    // TGs the satellite monitors (MsgPeerTgInterest from the satellite), e.g.
+    // the TGs its own clients or a PBX's calls use. Merged into the TG
+    // interest this reflector advertises to its trunk peers (and its parent).
+    const std::set<uint32_t>& tgInterest(void) const { return m_tg_interest; }
+
   private:
     static const unsigned HEARTBEAT_TX_CNT_RESET = 10;
     static const unsigned HEARTBEAT_RX_CNT_RESET = 15;
@@ -98,6 +104,7 @@ class SatelliteLink : public sigc::trackable
     unsigned                    m_hb_rx_cnt;
     std::set<uint32_t>          m_sat_active_tgs;
     TgFilter                    m_tg_filter;
+    std::set<uint32_t>          m_tg_interest;
     // Roster of clients attached to this satellite, learned via
     // MsgPeerNodeList from the satellite. Each entry carries
     // sat_id == m_satellite_id (stamped on ingest) so the Reflector can
@@ -114,6 +121,7 @@ class SatelliteLink : public sigc::trackable
     void handleMsgPeerFlush(std::istream& is);
     void handleMsgPeerHeartbeat(void);
     void handleMsgPeerFilter(std::istream& is);
+    void handleMsgPeerTgInterest(std::istream& is);
     void handleMsgPeerNodeList(std::istream& is);
     void handleMsgPeerClientConnected(std::istream& is);
     void handleMsgPeerClientDisconnected(std::istream& is);

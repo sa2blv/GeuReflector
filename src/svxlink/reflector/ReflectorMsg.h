@@ -2146,6 +2146,34 @@ class MsgPeerTgInterest : public ReflectorMsgBase<129>
 
 
 /**
+@brief  QSY a talk group, towards satellites
+@date   2026-10-27
+
+Sent by a parent reflector to its satellites when the clients on talk group
+from_tg are asked to QSY to to_tg (a client's QSY request, auto-QSY or the
+QSY PTY command). Clients on a satellite never get MsgRequestQsy otherwise,
+since only directly connected clients receive it. Only sent to satellites
+whose TG filter passes from_tg. A receiving reflector asks its own clients on
+from_tg to QSY and passes the message on to its satellites; any other
+satellite (e.g. a PBX) moves its own users of from_tg to to_tg. Satellites
+that do not know the message ignore it.
+*/
+class MsgPeerQsy : public ReflectorMsgBase<130>
+{
+  public:
+    MsgPeerQsy(void) : m_from_tg(0), m_to_tg(0) {}
+    MsgPeerQsy(uint32_t from_tg, uint32_t to_tg)
+      : m_from_tg(from_tg), m_to_tg(to_tg) {}
+    uint32_t fromTg(void) const { return m_from_tg; }
+    uint32_t toTg(void)   const { return m_to_tg; }
+    ASYNC_MSG_MEMBERS(m_from_tg, m_to_tg)
+  private:
+    uint32_t m_from_tg;
+    uint32_t m_to_tg;
+}; /* MsgPeerQsy */
+
+
+/**
 @brief   A namespace for stautsmessages
 @author  Peter Lundberg /SA2BLV
 @date    2026-01-10
