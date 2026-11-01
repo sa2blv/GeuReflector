@@ -35,6 +35,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <algorithm>
 #include <sstream>
 #include <regex>
+#include <cctype>
 #include <Log.h>
 
 
@@ -502,6 +503,83 @@ bool TGHandler::isRestricted(uint32_t tg) const
   std::string allow;
   return m_cfg->getValue(ss.str(), "ALLOW", allow);
 } /* TGHandler::isRestricted */
+
+
+namespace {
+  // Lower-case a copy of a DUPLEX_MODE value for case-insensitive compare.
+  std::string fdx_lc(std::string s)
+  {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return s;
+  }
+
+  // Parse a mixed TG list: single values and a-b ranges, comma separated,
+  // e.g. "91,240,300-310,500". Whitespace ignored. Returns true if `tg` is
+  // covered. Malformed tokens are skipped (safe, never throws).
+  bool fdx_tg_in_list(const std::string& list, uint32_t tg)
+  {
+    std::string tok;
+    std::istringstream ss(list);
+    while (std::getline(ss, tok, ','))
+    {
+      // strip whitespace
+      tok.erase(std::remove_if(tok.begin(), tok.end(),
+            [](unsigned char c){ return std::isspace(c); }), tok.end());
+      if (tok.empty()) { continue; }
+      std::size_t dash = tok.find('-');
+      try
+      {
+        if (dash == std::string::npos)
+        {
+          if (static_cast<uint32_t>(std::stoul(tok)) == tg) { return true; }
+        }
+        else
+        {
+          uint32_t lo = static_cast<uint32_t>(std::stoul(tok.substr(0, dash)));
+          uint32_t hi = static_cast<uint32_t>(std::stoul(tok.substr(dash + 1)));
+          if (lo > hi) { std::swap(lo, hi); }
+          if (tg >= lo && tg <= hi) { return true; }
+        }
+      }
+      catch (...) { /* skip malformed token */ }
+    }
+    return false;
+  }
+} /* anonymous namespace */
+
+
+bool TGHandler::fullDuplexForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return false; }
+
+  // 1) Explicit per-TG DUPLEX_MODE always wins (can force half even if the
+  //    TG is also listed in FULL_DUPLEX_TGS).
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  std::string mode;
+  if (m_cfg->getValue(ss.str(), "DUPLEX_MODE", mode) && !mode.empty())
+  {
+    return fdx_lc(mode) == "full";
+  }
+
+  // 2) GLOBAL FULL_DUPLEX_TGS list/range membership -> full.
+  std::string list;
+  if (m_cfg->getValue("GLOBAL", "FULL_DUPLEX_TGS", list) && !list.empty())
+  {
+    if (fdx_tg_in_list(list, tg)) { return true; }
+  }
+
+  // 3) GLOBAL DUPLEX_MODE default.
+  std::string gmode;
+  if (m_cfg->getValue("GLOBAL", "DUPLEX_MODE", gmode) && !gmode.empty())
+  {
+    return fdx_lc(gmode) == "full";
+  }
+
+  // 4) Default: half-duplex (legacy single-talker, unchanged).
+  return false;
+} /* TGHandler::fullDuplexForTG */
 
 
 /****************************************************************************

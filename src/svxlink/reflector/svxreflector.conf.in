@@ -21,6 +21,23 @@ TG_FOR_V1_CLIENTS=999
 #LOCAL_ALIASES=8:2620008,9:2620009/out,4001:2620400/in
 #CLUSTER_TGS=222,2221,91
 #RANDOM_QSY_RANGE=12399:100
+#
+# --- Full-duplex talk groups (per-TG audio conference mixing) ------------
+# Default is half-duplex (legacy single-talker) everywhere; nothing below
+# set == byte-identical old behaviour. A full-duplex TG mixes all talkers so
+# full- and half-duplex nodes can talk together on the same TG, and it is
+# 100% backward compatible toward the mesh (collapsed to one talker).
+#
+# Enable full duplex on specific TGs, ranges and mixed lists:
+#FULL_DUPLEX_TGS=91,240,300-310,500
+# Or enable globally for every TG (a per-TG [TG#n] DUPLEX_MODE still wins):
+#DUPLEX_MODE=full
+# Mixer tunables (only affect full-duplex TGs); may also be set per [TG#n]:
+#MIX_FRAME_MS=20
+#MIX_JITTER_MS=60
+#MIX_MAX_TALKERS=4
+#MIX_SOURCE_TIMEOUT_MS=10000
+#
 #HTTP_SRV_PORT=8080
 COMMAND_PTY=/dev/shm/reflector_ctrl
 #ACCEPT_CALLSIGN="[A-Z0-9][A-Z]{0,2}\\d[A-Z0-9]{0,3}[A-Z](?:-[A-Z0-9]{1,3})?"

@@ -220,6 +220,24 @@ class TGHandler : public sigc::trackable
 
     bool isRestricted(uint32_t tg) const;
 
+    /**
+     * @brief   Resolve the duplex mode for a talk group.
+     * @param   tg The talk group id.
+     * @return  true for full-duplex (per-TG audio mixing), false for
+     *          half-duplex (single-talker, legacy behaviour).
+     *
+     * Resolution order (first match wins), all config driven:
+     *   1. [TG#<tg>] DUPLEX_MODE = full|half  (explicit per-TG, always wins)
+     *   2. [GLOBAL]  FULL_DUPLEX_TGS list      (tg in set -> full)
+     *   3. [GLOBAL]  DUPLEX_MODE = full|half
+     *   4. otherwise half (legacy single-talker, unchanged)
+     *
+     * FULL_DUPLEX_TGS accepts a mixed comma list of single TGs and ranges,
+     * e.g. "91,240,300-310,500". Whitespace is ignored. Default (nothing
+     * set) is half everywhere, i.e. byte-identical legacy behaviour.
+     */
+    bool fullDuplexForTG(uint32_t tg) const;
+
     sigc::signal<void(uint32_t,
       ReflectorClient*, ReflectorClient*)> talkerUpdated;
 

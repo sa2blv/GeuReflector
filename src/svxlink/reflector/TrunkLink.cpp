@@ -1244,14 +1244,26 @@ void TrunkLink::handleMsgPeerAudio(std::istream& is)
   // Rebuild a UDP audio message and broadcast to local clients on this TG
   // — both clients with this TG selected and clients monitoring it.
   MsgUdpAudio udp_msg(msg.audio());
-  m_reflector->broadcastUdpMsg(udp_msg,
-      ReflectorClient::mkOrFilter(
-        ReflectorClient::TgFilter(deliver_tg),
-        ReflectorClient::mkAndFilter(
-          ReflectorClient::TgMonitorFilter(deliver_tg),
+  if (TGHandler::instance()->fullDuplexForTG(deliver_tg))
+  {
+    // Full-duplex: blend this peer's stream into the per-TG mixer instead of
+    // relaying it raw, so it mixes with local talkers and no client gets two
+    // overlapping Opus streams. onMixReady() distributes the result.
+    const std::string src_id =
+        "t:" + std::to_string(reinterpret_cast<uintptr_t>(this));
+    m_reflector->feedMeshAudioToMixer(deliver_tg, src_id, msg.audio());
+  }
+  else
+  {
+    m_reflector->broadcastUdpMsg(udp_msg,
+        ReflectorClient::mkOrFilter(
+          ReflectorClient::TgFilter(deliver_tg),
           ReflectorClient::mkAndFilter(
-            ReflectorClient::PassiveObserverFilter(),
-            ReflectorClient::EarliestMonitorTalkerFilter(deliver_tg)))));
+            ReflectorClient::TgMonitorFilter(deliver_tg),
+            ReflectorClient::mkAndFilter(
+              ReflectorClient::PassiveObserverFilter(),
+              ReflectorClient::EarliestMonitorTalkerFilter(deliver_tg)))));
+  }
 
   // Resend to BLV sub trunk
   m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, local_tg, Trunk_type_send);
