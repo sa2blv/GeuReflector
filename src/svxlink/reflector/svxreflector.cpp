@@ -580,6 +580,8 @@ int main(int argc, const char *argv[])
   geulog::info("core", PROGRAM_NAME " v" SVXREFLECTOR_VERSION
                " Copyright (C) 2003-2025 Tobias Blomberg / SM0SVX");
   geulog::info("core", "Modified with server-to-server trunk support by IW1GEU.");
+  geulog::info("core", "Full-duplex edition by SA7AUX: per-TG DUPLEX_MODE "
+               "mix-minus-self + satellite QSY.");
   geulog::info("core", PROGRAM_NAME " comes with ABSOLUTELY NO WARRANTY. "
                "This is free software, and you are");
   geulog::info("core", "welcome to redistribute it in accordance with the "
