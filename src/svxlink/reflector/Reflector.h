@@ -524,12 +524,38 @@ class Reflector : public sigc::trackable
     // old half-duplex peer sees exactly one remote talker (100% backward
     // compatible) and never flaps.
     std::map<uint32_t, int>      m_fdx_mesh_talkers;
-    // Current talker callsign per incoming-trunk TG, learned from the trunk
-    // TalkerStart (the type-101 audio frames carry no callsign of their own on
-    // every bridge). Used to drop a local client's own audio when it loops back
-    // over a trunk/bridge, so a node never hears itself (incl. simplex nodes
-    // that would otherwise get the delayed echo after releasing PTT).
-    std::map<uint32_t, std::string> m_trunk_talker;
+    // Current talker callsign per (LOCAL tg, trunk source address), learned
+    // from the trunk TalkerStart (the type-101 audio frames carry no callsign
+    // of their own on every bridge). Keyed per source so two trunks talking
+    // on the same TG never overwrite/erase each other's callsign, and always
+    // by the TG AFTER get_tg_from_dest_table() so store/lookup/erase agree.
+    // Used to drop a local client's own audio when it loops back over a
+    // trunk/bridge, so a node never hears itself.
+    std::map<std::pair<uint32_t, std::string>, std::string> m_trunk_talker;
+
+    // Half-duplex ownership of a (local) TG by a BLV UDP trunk source. The
+    // UDP trunk (msg types 101/140) had no arbitration at all, unlike the
+    // TCP TrunkLink: a local client could grab a TG while a remote trunk
+    // talker held it, and two trunks could feed the same TG at once.
+    struct BlvTrunkOwner
+    {
+      std::string    addr;       // trunk source address (addr.toString())
+      std::string    callsign;   // remote talker, may be empty
+      struct timeval last_seen;  // last TalkerStart/audio from this owner
+    };
+    std::map<uint32_t, BlvTrunkOwner> m_blv_owner;
+    // An owner that has been silent this long is considered gone (lost
+    // TalkerStop, dead trunk). Audio frames arrive every ~20-40 ms.
+    static constexpr long BLV_OWNER_TIMEOUT_MS   = 3000;
+    // Two talkers that start within this window on different reflectors
+    // are treated as a simultaneous PTT and resolved by a deterministic
+    // tie-break (lowest callsign wins) that both sides compute the same way.
+    static constexpr long BLV_CONFLICT_WINDOW_MS = 500;
+
+    bool blvTrunkOwnsTG(uint32_t tg);
+    bool blvTrunkClaimTG(uint32_t tg, const std::string& src,
+                         const std::string& callsign);
+    void blvTrunkReleaseTG(uint32_t tg, bool notify_clients);
     // Prefix bookkeeping for owner-relay decisions. m_local_prefixes holds
     // prefixes owned by this reflector (from GLOBAL/LOCAL_PREFIX);
     // m_all_prefixes is local + every peer's REMOTE_PREFIX. Populated in
