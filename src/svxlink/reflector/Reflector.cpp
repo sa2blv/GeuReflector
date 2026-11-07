@@ -5725,8 +5725,16 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
             msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, addr.toString());
 
-            broadcastUdpMsg(msg, ReflectorClient::TgFilter(msg.tg));
-            // Send to other   
+           broadcastUdpMsg(msg,
+   			 ReflectorClient::mkOrFilter(
+      		 ReflectorClient::TgFilter(msg.tg),
+      		 ReflectorClient::mkAndFilter(
+        	 ReflectorClient::TgMonitorFilter(msg.tg),
+        	 ReflectorClient::mkAndFilter(
+          	 ReflectorClient::PassiveObserverFilter(),
+          	 ReflectorClient::EarliestMonitorTalkerFilter(msg.tg)))));
+            
+			// Send to other   
             ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_newmsg(msg.tg, msg, addr.toString());
 
             std::string trunk_type = ReflectorTrunkManager::instance()->get_trunk_type(addr.toString());
