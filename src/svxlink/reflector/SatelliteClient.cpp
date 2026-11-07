@@ -283,6 +283,9 @@ void SatelliteClient::onFrameReceived(FramedTcpConnection* con,
     case MsgPeerClientStatus::TYPE:
       handleMsgPeerClientStatus(ss);
       break;
+    case MsgPeerQsy::TYPE:
+      handleMsgPeerQsy(ss);
+      break;
     default:
       break;
   }
@@ -317,12 +320,46 @@ void SatelliteClient::handleMsgPeerHello(std::istream& is)
   // Advertise our TG filter to the parent so it can skip TGs we
   // don't want. The parent applies the filter on its outbound path.
   sendFilter();
+  if (!m_tg_interest.empty())
+  {
+    sendMsg(MsgPeerTgInterest(m_satellite_id,
+        std::vector<uint32_t>(m_tg_interest.begin(), m_tg_interest.end())));
+  }
 
   // Trigger the reflector to push our local roster up immediately so the
   // parent can fan it out (debounced) — otherwise the first node-list
   // emission only happens on the next client login/TG-change.
   m_reflector->scheduleNodeListUpdate();
 } /* SatelliteClient::handleMsgPeerHello */
+
+
+void SatelliteClient::sendTgInterest(const std::set<uint32_t>& tgs)
+{
+  if (tgs == m_tg_interest) return;
+  m_tg_interest = tgs;
+  if (!m_con.isConnected() || !m_hello_received) return;
+  sendMsg(MsgPeerTgInterest(m_satellite_id,
+      std::vector<uint32_t>(m_tg_interest.begin(), m_tg_interest.end())));
+} /* SatelliteClient::sendTgInterest */
+
+
+void SatelliteClient::handleMsgPeerQsy(std::istream& is)
+{
+  MsgPeerQsy msg;
+  if (!msg.unpack(is)) return;
+  geulog::info("satellite", "Parent requests QSY TG #", msg.fromTg(),
+               " -> TG #", msg.toTg());
+  // QSY_FOLLOW (per-TG then GLOBAL) decides whether we honour a QSY that
+  // arrives from the mesh. Default on = unchanged behaviour.
+  if (!TGHandler::instance()->qsyFollowForTG(msg.fromTg()))
+  {
+    geulog::info("satellite", "Ignoring mesh QSY for TG #", msg.fromTg(),
+                 " (QSY_FOLLOW=0)");
+    return;
+  }
+  // our own clients on the TG, and our satellites
+  m_reflector->qsyTg(msg.fromTg(), msg.toTg());
+} /* SatelliteClient::handleMsgPeerQsy */
 
 
 void SatelliteClient::sendFilter(void)

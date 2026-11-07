@@ -71,6 +71,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include "Reflector.h"
 #include "ReflectorClient.h"
 #include "TGHandler.h"
+#include "TGMixer.h"
 #include "TrunkLink.h"
 #include <Log.h>
 #include "TwinLink.h"
@@ -873,20 +874,26 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
     return;
   }
 
+  if (!TGHandler::instance()->qsyEnableForTG(current_tg))
+  {
+    geulog::info("client", client->callsign(),
+              ": QSY disabled for TG #", current_tg, " (QSY_ENABLE=0)");
+    return;
+  }
+
   if (tg == 0)
   {
-    tg = nextRandomQsyTg();
+    tg = nextRandomQsyTg(current_tg);
     if (tg == 0) { return; }
   }
 
   geulog::info("client", client->callsign(), ": Requesting QSY from TG #",
        current_tg, " to TG #", tg);
 
-  broadcastMsg(MsgRequestQsy(tg),
-      ReflectorClient::mkAndFilter(
-        ge_v2_client_filter,
-        ReflectorClient::TgFilter(current_tg)));
-        
+  // Local clients on current_tg + any satellites carrying it.
+  qsyTg(current_tg, tg);
+
+    // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
     msg_trunk.talker_status = 4;
     msg_trunk.tg = current_tg;
@@ -894,10 +901,30 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
     msg_trunk.talker = client->callsign();
 
     ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(current_tg, msg_trunk);
-    
-    
-        
+
+
+
 } /* Reflector::requestQsy */
+
+
+void Reflector::qsyTg(uint32_t from_tg, uint32_t to_tg)
+{
+  if ((from_tg == 0) || (to_tg == 0) || (from_tg == to_tg))
+  {
+    return;
+  }
+
+  broadcastMsg(MsgRequestQsy(to_tg),
+      ReflectorClient::mkAndFilter(
+        ge_v2_client_filter,
+        ReflectorClient::TgFilter(from_tg)));
+
+  // Clients on satellites never see MsgRequestQsy: tell the satellites
+  for (const auto& kv : m_satellite_con_map)
+  {
+    kv.second->sendQsy(from_tg, to_tg);
+  }
+} /* Reflector::qsyTg */
 
 
 Async::SslCertSigningReq
@@ -1305,6 +1332,9 @@ void Reflector::clientDisconnected(Async::FramedTcpConnection *con,
   ReflectorClient *client = (*it).second;
 
   TGHandler::instance()->removeClient(client);
+  // Full-duplex: drop this client from any per-TG mixer and tear down an
+  // empty mixer (self-heals the mesh talker count via sourceActivity).
+  removeFromAllMixers(client);
 
   if (!client->callsign().empty())
   {
@@ -1625,10 +1655,24 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
         uint32_t tg = TGHandler::instance()->TGForClient(client);
         if (!msg.audioData().empty() && (tg > 0))
         {
-        
+
            msg_trunk.tg = tg;
 
-        
+          // --- FULL DUPLEX: feed the per-TG mixer. No single-talker lock,
+          //     so this client and any other (full or half) mix together.
+          //     Distribution to clients + mesh is done by onMixReady(). ---
+          if (TGHandler::instance()->fullDuplexForTG(tg))
+          {
+            const std::string fdx_id = "c:" + std::to_string(client->clientId());
+            TGMixer* mx = getOrCreateMixer(tg);
+            if (mx != nullptr)
+            {
+              mx->writeOpus(fdx_id, msg.audioData(), /*local=*/true,
+                            client->callsign());
+            }
+          }
+          else
+          {
           ReflectorClient* talker = TGHandler::instance()->talkerForTG(tg);
           if ((talker == 0) &&
               !TGHandler::instance()->hasTrunkTalker(tg))
@@ -1674,6 +1718,7 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
               }
             }
           }
+          } // end else: half-duplex single-talker path (full handled above)
         }
       }
       break;
@@ -1939,6 +1984,281 @@ void Reflector::onTalkerUpdated(uint32_t tg, ReflectorClient* old_talker,
 } /* Reflector::onTalkerUpdated */
 
 
+/* ===================================================================== *
+ *  Full-duplex per-TG mixing (ported from GeuReflector geu-ref).        *
+ *  Only active on TGs resolved to full by TGHandler::fullDuplexForTG(). *
+ *  Half-duplex TGs never touch any of this -> byte-identical legacy.    *
+ * ===================================================================== */
+
+TGMixer* Reflector::getOrCreateMixer(uint32_t tg)
+{
+  auto it = m_tg_mixers.find(tg);
+  if (it != m_tg_mixers.end())
+  {
+    return it->second;
+  }
+  if (m_cfg == nullptr)
+  {
+    return nullptr;
+  }
+  TGMixer* mx = new TGMixer(tg, *m_cfg);
+  mx->mixReady.connect(mem_fun(*this, &Reflector::onMixReady));
+  mx->sourceActivity.connect(mem_fun(*this, &Reflector::onSourceActivity));
+  m_tg_mixers[tg] = mx;
+  return mx;
+} /* Reflector::getOrCreateMixer */
+
+
+void Reflector::removeFromAllMixers(ReflectorClient* client)
+{
+  if (client == nullptr)
+  {
+    return;
+  }
+  const std::string id = "c:" + std::to_string(client->clientId());
+  for (auto it = m_tg_mixers.begin(); it != m_tg_mixers.end(); )
+  {
+    TGMixer* mx = it->second;
+    mx->removeSource(id);
+    if (mx->sourceCount() == 0)
+    {
+      delete mx;
+      it = m_tg_mixers.erase(it);
+    }
+    else
+    {
+      ++it;
+    }
+  }
+} /* Reflector::removeFromAllMixers */
+
+
+void Reflector::feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
+                                     const std::vector<uint8_t>& audio)
+{
+  if (audio.empty())
+  {
+    return;
+  }
+  TGMixer* mx = getOrCreateMixer(tg);
+  if (mx != nullptr)
+  {
+    mx->writeOpus(srcid, audio, /*local=*/false);
+  }
+} /* Reflector::feedMeshAudioToMixer */
+
+
+void Reflector::onMixReady(const MixResult& result)
+{
+  // --- Local clients: mix-minus-self to active sources, full mix to the
+  //     rest. A single Opus stream per client (never two) so node decoders
+  //     stay in sync. ---
+  const TGHandler::ClientSet& clients =
+      TGHandler::instance()->clientsForTG(result.tg);
+  for (ReflectorClient* c : clients)
+  {
+    const std::string id = "c:" + std::to_string(c->clientId());
+    auto pit = result.per_source.find(id);
+    if (pit != result.per_source.end())
+    {
+      if (!pit->second.empty())
+      {
+        MsgUdpAudio m(pit->second);
+        c->sendUdpMsg(m);
+      }
+    }
+    else if (!result.full.empty())
+    {
+      MsgUdpAudio m(result.full);
+      c->sendUdpMsg(m);
+    }
+  }
+
+  // --- Mesh: this reflector's LOCAL sub-mix only (never mesh-sourced audio,
+  //     so it can never loop back) goes out as ONE collapsed stream on both
+  //     the UDP trunk and the TCP/satellite/twin links. ---
+  if (!result.local_mix.empty())
+  {
+    MsgUdpAudio_trunk msg_trunk;
+    msg_trunk.audioData() = result.local_mix;
+    msg_trunk.tg = result.tg;
+    ReflectorTrunkManager::instance()->handleOutgoingAudio_width_remap(
+        result.tg, msg_trunk);
+
+    if (m_is_satellite && (m_satellite_client != nullptr))
+    {
+      m_satellite_client->onLocalAudio(result.tg, result.local_mix);
+    }
+    else
+    {
+      for (auto* link : m_trunk_links)
+      {
+        link->onLocalAudio(result.tg, result.local_mix);
+      }
+      for (auto& kv : m_satellite_con_map)
+      {
+        kv.second->onParentAudio(result.tg, result.local_mix);
+      }
+      if (m_twin_link != nullptr)
+      {
+        m_twin_link->onLocalAudio(result.tg, result.local_mix);
+      }
+    }
+  }
+} /* Reflector::onMixReady */
+
+
+void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
+                                 const std::string& callsign, bool active)
+{
+  // Only LOCAL sources ("c:<clientId>") drive talker-start/stop here. Mesh
+  // sources are signalled to peers by the originating reflector's own
+  // collapse, so ignore them here to avoid double signalling.
+  if (id.rfind("c:", 0) != 0)
+  {
+    return;
+  }
+  // Best-effort resolve the client (for updateIsTalker); message still
+  // carries the callsign if it has already gone.
+  ReflectorClient* client = nullptr;
+  try
+  {
+    ReflectorClient::ClientId cid =
+        static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
+    const TGHandler::ClientSet& cl = TGHandler::instance()->clientsForTG(tg);
+    for (ReflectorClient* c : cl)
+    {
+      if (c->clientId() == cid) { client = c; break; }
+    }
+  }
+  catch (...)
+  {
+    client = nullptr;
+  }
+
+  if (active)
+  {
+    if (client != nullptr) { client->updateIsTalker(); }
+    // Per-talker start toward LOCAL clients (dashboards/TCL show each one).
+    broadcastMsg(MsgTalkerStart(tg, callsign),
+        ReflectorClient::mkAndFilter(
+          ge_v2_client_filter,
+          ReflectorClient::mkOrFilter(
+            ReflectorClient::TgFilter(tg),
+            ReflectorClient::TgMonitorFilter(tg))));
+    if (tg == tgForV1Clients())
+    {
+      broadcastMsg(MsgTalkerStartV1(callsign), v1_client_filter);
+    }
+    if (m_mqtt != nullptr)   { m_mqtt->onTalkerStart(tg, callsign, false); }
+    if (m_redis != nullptr)  { m_redis->pushLiveTalker(tg, callsign, "local"); }
+    // ONE collapsed talker toward the mesh.
+    meshConferenceTalkerStart(tg, callsign);
+  }
+  else
+  {
+    if (client != nullptr) { client->updateIsTalker(); }
+    broadcastMsg(MsgTalkerStop(tg, callsign),
+        ReflectorClient::mkAndFilter(
+          ge_v2_client_filter,
+          ReflectorClient::mkOrFilter(
+            ReflectorClient::TgFilter(tg),
+            ReflectorClient::TgMonitorFilter(tg))));
+    if (tg == tgForV1Clients())
+    {
+      broadcastMsg(MsgTalkerStopV1(callsign), v1_client_filter);
+    }
+    if (m_mqtt != nullptr)   { m_mqtt->onTalkerStop(tg, callsign, false); }
+    if (m_redis != nullptr)  { m_redis->clearLiveTalker(tg); }
+    meshConferenceTalkerStop(tg);
+  }
+} /* Reflector::onSourceActivity */
+
+
+void Reflector::meshConferenceTalkerStart(uint32_t tg,
+                                          const std::string& callsign)
+{
+  int& n = m_fdx_mesh_talkers[tg];
+  if (n <= 0)
+  {
+    n = 0;
+    // First local talker on this full-duplex TG -> one mesh talker-start.
+    MSG_Trunk_Change msg_trunk;
+    msg_trunk.talker_status = 2;      // 2 = talker start (existing wire value)
+    msg_trunk.tg = tg;
+    msg_trunk.talker = callsign;
+    ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(
+        tg, msg_trunk);
+
+    if (m_is_satellite && (m_satellite_client != nullptr))
+    {
+      m_satellite_client->onLocalTalkerStart(tg, callsign);
+    }
+    else
+    {
+      for (auto* link : m_trunk_links)
+      {
+        link->onLocalTalkerStart(tg, callsign);
+      }
+      for (auto& kv : m_satellite_con_map)
+      {
+        kv.second->onParentTalkerStart(tg, callsign);
+      }
+      if (m_twin_link != nullptr)
+      {
+        m_twin_link->onLocalTalkerUpdated(tg, callsign);
+      }
+    }
+  }
+  ++n;
+} /* Reflector::meshConferenceTalkerStart */
+
+
+void Reflector::meshConferenceTalkerStop(uint32_t tg)
+{
+  auto it = m_fdx_mesh_talkers.find(tg);
+  if (it == m_fdx_mesh_talkers.end())
+  {
+    return;
+  }
+  if (it->second <= 0)
+  {
+    m_fdx_mesh_talkers.erase(it);
+    return;
+  }
+  if (--it->second <= 0)
+  {
+    m_fdx_mesh_talkers.erase(it);
+    // Last local talker dropped -> one mesh talker-stop.
+    MSG_Trunk_Change msg_trunk;
+    msg_trunk.talker_status = 1;      // 1 = talker stop (existing wire value)
+    msg_trunk.tg = tg;
+    ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(
+        tg, msg_trunk);
+
+    if (m_is_satellite && (m_satellite_client != nullptr))
+    {
+      m_satellite_client->onLocalTalkerStop(tg);
+    }
+    else
+    {
+      for (auto* link : m_trunk_links)
+      {
+        link->onLocalTalkerStop(tg);
+      }
+      for (auto& kv : m_satellite_con_map)
+      {
+        kv.second->onParentTalkerStop(tg);
+      }
+      if (m_twin_link != nullptr)
+      {
+        m_twin_link->onLocalTalkerUpdated(tg, "");
+      }
+    }
+  }
+} /* Reflector::meshConferenceTalkerStop */
+
+
 void Reflector::httpRequestReceived(Async::HttpServerConnection *con,
                                     Async::HttpServerConnection::Request& req)
 {
@@ -2185,17 +2505,16 @@ void Reflector::httpClientDisconnected(Async::HttpServerConnection *con,
 
 void Reflector::onRequestAutoQsy(uint32_t from_tg)
 {
-  uint32_t tg = nextRandomQsyTg();
+  uint32_t tg = nextRandomQsyTg(from_tg);
   if (tg == 0) { return; }
 
   geulog::info("core", "Requesting auto-QSY from TG #", from_tg,
             " to TG #", tg);
 
-  broadcastMsg(MsgRequestQsy(tg),
-      ReflectorClient::mkAndFilter(
-        ge_v2_client_filter,
-        ReflectorClient::TgFilter(from_tg)));
-        
+  // Local clients on from_tg + any satellites carrying it.
+  qsyTg(from_tg, tg);
+
+    // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
     msg_trunk.talker_status = 4;
     msg_trunk.tg = from_tg;
@@ -2208,8 +2527,27 @@ void Reflector::onRequestAutoQsy(uint32_t from_tg)
 } /* Reflector::onRequestAutoQsy */
 
 
-uint32_t Reflector::nextRandomQsyTg(void)
+uint32_t Reflector::nextRandomQsyTg(uint32_t from_tg)
 {
+  // Preferred: explicit QSY_TGS pool (per-TG then GLOBAL), mixed list/range
+  // "x,x-x,x". Picks the first TG in the pool that currently has no clients.
+  // When QSY_TGS is not configured, fall back to the legacy RANDOM_QSY_RANGE
+  // logic below (byte-identical old behaviour).
+  std::vector<uint32_t> pool = TGHandler::instance()->qsyTgsForTG(from_tg);
+  if (!pool.empty())
+  {
+    for (uint32_t cand : pool)
+    {
+      if ((cand != 0) && (cand != from_tg) &&
+          TGHandler::instance()->clientsForTG(cand).empty())
+      {
+        return cand;
+      }
+    }
+    geulog::warn("core", "No free TG available in QSY_TGS for QSY");
+    return 0;
+  }
+
   if (m_random_qsy_tg == 0)
   {
     geulog::warn("core", "QSY request for random TG "
@@ -2542,13 +2880,43 @@ void Reflector::ctrlPtyDataReceived(const void *buf, size_t count)
       }
     }
   }
+  else if (cmd == "QSY")
+  {
+    uint32_t from_tg = 0, to_tg = 0;
+    if (!(ss >> from_tg) || (from_tg == 0))
+    {
+      errss << "Invalid QSY PTY command '" << cmdline << "'. "
+               "Usage: QSY <from TG> [<to TG>]";
+      goto write_status;
+    }
+    if (!(ss >> to_tg) || (to_tg == 0))
+    {
+      to_tg = nextRandomQsyTg(from_tg);
+      if (to_tg == 0)
+      {
+        errss << "No TG given and no random QSY TG available "
+                 "(GLOBAL/RANDOM_QSY_RANGE)";
+        goto write_status;
+      }
+    }
+    if (to_tg == from_tg)
+    {
+      errss << "QSY to the same TG #" << from_tg;
+      goto write_status;
+    }
+    geulog::info("core", "PTY: QSY from TG #", from_tg, " to TG #", to_tg);
+    qsyTg(from_tg, to_tg);
+    m_cmd_pty->write("QSY: TG #" + std::to_string(from_tg) + " -> TG #" +
+                     std::to_string(to_tg) + "\n");
+  }
   else
   {
-    errss << "Valid commands are: CFG, NODE, CA, TRUNK, LOG\n"
+    errss << "Valid commands are: CFG, NODE, CA, QSY, TRUNK, LOG\n"
           << "Usage:\n"
           << "CFG <section> <tag> <value>\n"
           << "NODE BLOCK <callsign> <blocktime seconds>\n"
           << "CA LS|LSC|LSP|SIGN <callsign>|RM <callsign>\n"
+          << "QSY <from TG> [<to TG>]\n"
           << "TRUNK MUTE|UNMUTE <section> <callsign>\n"
           << "TRUNK RELOAD [<section>]\n"
           << "TRUNK STATUS [<section>]\n"
@@ -3173,6 +3541,7 @@ void Reflector::satelliteDisconnected(Async::FramedTcpConnection* con,
     delete it->second;
     m_satellite_con_map.erase(it);
     publishMetaToRedis();
+    scheduleTgInterestUpdate();
   }
 } /* Reflector::satelliteDisconnected */
 
@@ -3211,6 +3580,7 @@ void Reflector::processSatelliteCleanup(Async::Timer* t)
     }
     delete link;
     m_satellite_con_map.erase(con);
+    scheduleTgInterestUpdate();
     con->disconnect();
     publishMetaToRedis();
   }
@@ -4134,9 +4504,23 @@ void Reflector::scheduleTgInterestUpdate(void)
 
 
 
+  // TGs our satellites monitor (MsgPeerTgInterest), e.g. a satellite
+  // reflector's clients or a PBX's calls, count as local interest too.
+  for (const auto& kv : m_satellite_con_map)
+  {
+    if (kv.second == nullptr || !kv.second->isAuthenticated()) continue;
+    const auto& sat = kv.second->tgInterest();
+    local_interest.insert(sat.begin(), sat.end());
+  }
+
   for (auto* link : m_trunk_links)
   {
     link->scheduleTgInterestRefresh(local_interest);
+  }
+  // Satellite mode: tell the parent what we (and our satellites) monitor.
+  if (m_satellite_client != nullptr)
+  {
+    m_satellite_client->sendTgInterest(local_interest);
   }
 } /* Reflector::scheduleTgInterestUpdate */
 
@@ -5725,6 +6109,17 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
             msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, addr.toString());
 
+            if (TGHandler::instance()->fullDuplexForTG(msg.tg))
+            {
+              // Full-duplex: blend the remote stream into the mixer instead
+              // of the raw single-talker relay, so it mixes with local
+              // talkers and no client ever gets two overlapping Opus streams.
+              feedMeshAudioToMixer(msg.tg, "u:" + addr.toString(),
+                                   msg.audioData());
+            }
+            else
+            {
+
            broadcastUdpMsg(msg,
    			 ReflectorClient::mkOrFilter(
       		 ReflectorClient::TgFilter(msg.tg),
@@ -5733,8 +6128,9 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
         	 ReflectorClient::mkAndFilter(
           	 ReflectorClient::PassiveObserverFilter(),
           	 ReflectorClient::EarliestMonitorTalkerFilter(msg.tg)))));
-            
-			// Send to other   
+              
+            }
+            // Send to other
             ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_newmsg(msg.tg, msg, addr.toString());
 
             std::string trunk_type = ReflectorTrunkManager::instance()->get_trunk_type(addr.toString());

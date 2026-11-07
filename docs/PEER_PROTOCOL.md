@@ -600,6 +600,32 @@ happens before dispatch, so unknown frames count as keepalive). An old peer
 receiving these types ignores them and falls back to the existing
 `MsgPeerNodeList` snapshot mechanism.
 
+### `MsgPeerTgInterest` / `MsgPeerQsy` — satellite TG interest & QSY (types 129–130)
+
+| Type | Name | Fields |
+|------|------|--------|
+| 129  | `MsgPeerTgInterest` | `string peer_id`, `uint32[] tgs` (satellite → parent: the TGs the satellite monitors) |
+| 130  | `MsgPeerQsy`        | `uint32 from_tg`, `uint32 to_tg` (parent → satellite: QSY from_tg → to_tg) |
+
+**`MsgPeerTgInterest` (129):** a satellite advertises the TGs its own clients
+(and its own satellites) monitor, so the parent routes that traffic to it
+without a PTT first. The parent stores the set per satellite (cap 1000),
+merges it into the interest it advertises to its trunks (and, in satellite
+mode, up to its own parent), and drops it on disconnect. An empty list
+withdraws all interest. Sent on (re)authentication and whenever the set
+changes. Unknown to old peers → ignored.
+
+**`MsgPeerQsy` (130):** when a reflector QSYs a talk group (a client/DTMF
+request, auto-QSY, or the `QSY` PTY command) it also sends
+`MsgPeerQsy(from_tg, to_tg)` to every satellite whose filter passes `from_tg`.
+The receiving satellite asks its own clients on `from_tg` to QSY — honoured
+only when `QSY_FOLLOW` is set for that TG — and passes the message on to its
+own satellites (tree, so no loop). Directly-connected clients still get
+`MsgRequestQsy`; Peter's UDP-trunk QSY announce (`talker_status=4`) is
+unchanged and runs in parallel. QSY config (`AUTO_QSY`, `AUTO_QSY_AFTER`,
+`QSY_ENABLE`, `QSY_FOLLOW`, `QSY_TGS`) is per-TG then GLOBAL — see
+`svxreflector.conf.in`.
+
 `MsgPeerNodeList` is emitted by the reflector on local client login, logout,
 or TG change, debounced to 500 ms, and broadcast to every trunk peer. Peers
 republish it via MQTT under `nodes/<peer_id>` so a central dashboard can see

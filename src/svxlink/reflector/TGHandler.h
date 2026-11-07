@@ -37,6 +37,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 #include <sigc++/sigc++.h>
 #include <sys/time.h>
 
@@ -219,6 +220,43 @@ class TGHandler : public sigc::trackable
     bool showActivity(uint32_t tg) const;
 
     bool isRestricted(uint32_t tg) const;
+
+    /**
+     * @brief   Resolve the duplex mode for a talk group.
+     * @param   tg The talk group id.
+     * @return  true for full-duplex (per-TG audio mixing), false for
+     *          half-duplex (single-talker, legacy behaviour).
+     *
+     * Resolution order (first match wins), all config driven:
+     *   1. [TG#<tg>] DUPLEX_MODE = full|half  (explicit per-TG, always wins)
+     *   2. [GLOBAL]  FULL_DUPLEX_TGS list      (tg in set -> full)
+     *   3. [GLOBAL]  DUPLEX_MODE = full|half
+     *   4. otherwise half (legacy single-talker, unchanged)
+     *
+     * FULL_DUPLEX_TGS accepts a mixed comma list of single TGs and ranges,
+     * e.g. "91,240,300-310,500". Whitespace is ignored. Default (nothing
+     * set) is half everywhere, i.e. byte-identical legacy behaviour.
+     */
+    bool fullDuplexForTG(uint32_t tg) const;
+
+    // --- QSY config resolution (per-TG [TG#n] overrides GLOBAL) ----------
+    // Seconds of idle before an automatic QSY; 0 = disabled. Per-TG then
+    // GLOBAL AUTO_QSY_AFTER.
+    time_t autoQsyAfterForTG(uint32_t tg) const;
+    // Whether idle auto-QSY is active. Explicit AUTO_QSY (per-TG then GLOBAL)
+    // wins; legacy default = enabled iff AUTO_QSY_AFTER>0 (old setups
+    // unchanged).
+    bool   autoQsyEnabledForTG(uint32_t tg) const;
+    // Whether a client/DTMF-requested QSY is honoured (QSY_ENABLE, default 1).
+    bool   qsyEnableForTG(uint32_t tg) const;
+    // Whether a QSY received from the mesh is honoured (QSY_FOLLOW, default 1).
+    bool   qsyFollowForTG(uint32_t tg) const;
+    // Allowed QSY target pool (QSY_TGS mixed list/range "x,x-x,x"), per-TG
+    // then GLOBAL, expanded to explicit TGs. Empty => not configured (the
+    // caller falls back to RANDOM_QSY_RANGE).
+    std::vector<uint32_t> qsyTgsForTG(uint32_t tg) const;
+    // Generic per-TG-then-GLOBAL bool config resolver.
+    bool   qsyBoolForTG(uint32_t tg, const char* key, bool def) const;
 
     sigc::signal<void(uint32_t,
       ReflectorClient*, ReflectorClient*)> talkerUpdated;

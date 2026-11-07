@@ -94,6 +94,8 @@ class ReflectorMsg;
 class ReflectorUdpMsg;
 class RedisStore;
 class TwinLink;
+class TGMixer;        // full-duplex per-TG conference mixer
+struct MixResult;     // one mixed frame produced by a TGMixer
 
 
 /****************************************************************************
@@ -223,6 +225,17 @@ class Reflector : public sigc::trackable
      */
     void requestQsy(ReflectorClient *client, uint32_t tg);
 
+    /**
+     * @brief   QSY all users of a talk group to another one
+     * @param   from_tg The talk group to leave
+     * @param   to_tg   The talk group to go to
+     *
+     * Directly connected clients on from_tg get MsgRequestQsy, satellites
+     * whose filter passes from_tg get MsgPeerQsy. Peter's UDP-trunk QSY
+     * announce (talker_status=4) is kept separately in the callers.
+     */
+    void qsyTg(uint32_t from_tg, uint32_t to_tg);
+
     Async::EncryptedUdpSocket* udpSocket(void) const { return m_udp_sock; }
 
     uint32_t randomQsyLo(void) const { return m_random_qsy_lo; }
@@ -343,6 +356,12 @@ class Reflector : public sigc::trackable
     void forwardAudioToSatellitesExcept(SatelliteLink* except, uint32_t tg,
                                          const std::vector<uint8_t>& audio);
     void forwardFlushToSatellitesExcept(SatelliteLink* except, uint32_t tg);
+
+    /** Feed mesh-sourced audio (trunk/satellite/twin) into a full-duplex
+     *  TG's mixer as a non-local source instead of the single-talker relay.
+     *  Public so the link classes can call it on a DUPLEX_MODE=full TG. */
+    void feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
+                              const std::vector<uint8_t>& audio);
 
     /**
      * Resolve the HMAC secret to verify a satellite's MsgPeerHello.
@@ -484,6 +503,16 @@ class Reflector : public sigc::trackable
     std::map<std::string, std::vector<MsgPeerNodeList::NodeEntry>> m_peer_nodes_map;
 
     std::vector<TrunkLink*>     m_trunk_links;
+
+    // --- Full-duplex per-TG mixing (ported from GeuReflector geu-ref) ---
+    // One conference mixer per full-duplex TG (DUPLEX_MODE=full /
+    // FULL_DUPLEX_TGS). Absent for half-duplex TGs -> zero overhead there.
+    std::map<uint32_t, TGMixer*> m_tg_mixers;
+    // Count of active LOCAL talkers per full-duplex TG, used to collapse the
+    // local conference to a SINGLE talker-start/stop toward the mesh so an
+    // old half-duplex peer sees exactly one remote talker (100% backward
+    // compatible) and never flaps.
+    std::map<uint32_t, int>      m_fdx_mesh_talkers;
     // Prefix bookkeeping for owner-relay decisions. m_local_prefixes holds
     // prefixes owned by this reflector (from GLOBAL/LOCAL_PREFIX);
     // m_all_prefixes is local + every peer's REMOTE_PREFIX. Populated in
@@ -567,13 +596,35 @@ class Reflector : public sigc::trackable
                              void* aad, void *buf, int count);
     void onTalkerUpdated(uint32_t tg, ReflectorClient* old_talker,
                          ReflectorClient *new_talker);
+
+    // --- Full-duplex per-TG mixing (ported from GeuReflector geu-ref) ---
+    /** Get (creating if needed) the full-duplex mixer for a TG. */
+    TGMixer* getOrCreateMixer(uint32_t tg);
+    /** Route one mixed frame: mix-minus-self to active local sources, full
+     *  mix to passive listeners, and the collapsed local sub-mix onto the
+     *  mesh (UDP trunk + TCP/satellite/twin). */
+    void onMixReady(const MixResult& result);
+    /** Per-source talker activity from a TGMixer: emits per-talker
+     *  start/stop to local clients and collapses to ONE talker toward the
+     *  mesh via meshConferenceTalkerStart/Stop. */
+    void onSourceActivity(uint32_t tg, const std::string& id,
+                          const std::string& callsign, bool active);
+    /** Drop a client from every mixer (on disconnect); tear down an empty
+     *  mixer. */
+    void removeFromAllMixers(ReflectorClient* client);
+    /** Collapse the local conference to a single mesh talker-start (0 -> >=1
+     *  local talkers) / talker-stop (>=1 -> 0). Counts via
+     *  m_fdx_mesh_talkers. Backward compatible: an old half-duplex peer sees
+     *  exactly one remote talker. */
+    void meshConferenceTalkerStart(uint32_t tg, const std::string& callsign);
+    void meshConferenceTalkerStop(uint32_t tg);
     void httpRequestReceived(Async::HttpServerConnection *con,
                              Async::HttpServerConnection::Request& req);
     void httpClientConnected(Async::HttpServerConnection *con);
     void httpClientDisconnected(Async::HttpServerConnection *con,
         Async::HttpServerConnection::DisconnectReason reason);
     void onRequestAutoQsy(uint32_t from_tg);
-    uint32_t nextRandomQsyTg(void);
+    uint32_t nextRandomQsyTg(uint32_t from_tg = 0);
     void ctrlPtyDataReceived(const void *buf, size_t count);
     void cfgUpdated(const std::string& section, const std::string& tag);
     void onTrunkTalkerUpdated(uint32_t tg, std::string old_cs,
