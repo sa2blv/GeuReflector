@@ -6100,17 +6100,21 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
             }
           */
 
-            ReflectorClient* local_talker = TGHandler::instance()->talkerForTG(msg.tg);
-
-            if (local_talker != nullptr)
+            // Single-talker conflict guard only applies to half-duplex TGs. On
+            // a full-duplex TG talkerForTG() is never set (the mixer owns the
+            // TG), so skip it — otherwise, in a trunk CHAIN, this return would
+            // drop incoming trunk AUDIO (and its onward resend) whenever a local
+            // talker holds the TG.
+            if (!TGHandler::instance()->fullDuplexForTG(msg.tg))
             {
-                std::cout << "Talker conflict on" << msg.tg << "\r\n";
-
-                return;
+                ReflectorClient* local_talker =
+                    TGHandler::instance()->talkerForTG(msg.tg);
+                if (local_talker != nullptr)
+                {
+                    std::cout << "Talker conflict on" << msg.tg << "\r\n";
+                    return;
+                }
             }
-
-
-
 
             msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, addr.toString());
 
