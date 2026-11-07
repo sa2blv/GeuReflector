@@ -6119,7 +6119,16 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
             }
             else
             {
-              broadcastUdpMsg(msg, ReflectorClient::TgFilter(msg.tg));
+
+           broadcastUdpMsg(msg,
+   			 ReflectorClient::mkOrFilter(
+      		 ReflectorClient::TgFilter(msg.tg),
+      		 ReflectorClient::mkAndFilter(
+        	 ReflectorClient::TgMonitorFilter(msg.tg),
+        	 ReflectorClient::mkAndFilter(
+          	 ReflectorClient::PassiveObserverFilter(),
+          	 ReflectorClient::EarliestMonitorTalkerFilter(msg.tg)))));
+              
             }
             // Send to other
             ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_newmsg(msg.tg, msg, addr.toString());
