@@ -6116,7 +6116,38 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
                 }
             }
 
+            // Attribute this trunk audio to a talker callsign: prefer the
+            // per-frame Talker field, else the callsign learned from the trunk
+            // TalkerStart for this incoming TG (many bridges tag only the
+            // TalkerStart, not every audio frame).
+            std::string trunk_cs = msg.Talker;
+            if (trunk_cs.empty())
+            {
+                auto tcit = m_trunk_talker.find(msg.tg);
+                if (tcit != m_trunk_talker.end()) { trunk_cs = tcit->second; }
+            }
+
             msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, addr.toString());
+
+            // Trunk self-echo guard: if this trunk talker is one of OUR OWN
+            // local clients on this TG, the audio has looped back over the
+            // bridge/trunk. Drop it entirely so it never reaches ANY local
+            // client -- the originator included, which is crucial for simplex
+            // nodes that would otherwise hear the delayed echo after releasing
+            // PTT. The client's own direct audio is already in the mix. Chain-
+            // safe: at a transit reflector the callsign is not local, so the
+            // audio is relayed on as normal.
+            if (!trunk_cs.empty())
+            {
+                for (ReflectorClient* lc :
+                         TGHandler::instance()->clientsForTG(msg.tg))
+                {
+                    if (lc->callsign() == trunk_cs)
+                    {
+                        return;
+                    }
+                }
+            }
 
             if (TGHandler::instance()->fullDuplexForTG(msg.tg))
             {
@@ -6124,7 +6155,7 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
               // of the raw single-talker relay, so it mixes with local
               // talkers and no client ever gets two overlapping Opus streams.
               feedMeshAudioToMixer(msg.tg, "u:" + addr.toString(),
-                                   msg.audioData(), msg.Talker);
+                                   msg.audioData(), trunk_cs);
             }
             else
             {
@@ -6231,6 +6262,14 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
             cout << header_v3.talker << " -> Trunk "<< addr.toString() <<": Talker start on TG #" << header_v3.tg << endl;
 
+            // Remember who is talking on this (incoming) trunk TG, so the audio
+            // frames that follow can be attributed to a callsign even when they
+            // carry none, and a local client's own loop-back can be dropped.
+            if (!header_v3.talker.empty())
+            {
+                m_trunk_talker[header_v3.tg] = header_v3.talker;
+            }
+
             // PTT talker handler. The single-talker conflict guard only makes
             // sense on a HALF-duplex TG; on a full-duplex TG talkerForTG() is
             // never set (the mixer owns the TG, no single-talker lock), so skip
@@ -6330,6 +6369,10 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
             TGHandler::instance()->clearTrunkTalkerForTG(header_v3.tg);
             */
+
+            // Talker stopped on this (incoming) trunk TG: forget the callsign
+            // (use the pre-remap tg, matching how it was stored on TalkerStart).
+            m_trunk_talker.erase(header_v3.tg);
 
             header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, addr.toString());
 
