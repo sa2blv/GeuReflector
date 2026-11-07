@@ -6100,17 +6100,21 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
             }
           */
 
-            ReflectorClient* local_talker = TGHandler::instance()->talkerForTG(msg.tg);
-
-            if (local_talker != nullptr)
+            // Single-talker conflict guard only applies to half-duplex TGs. On
+            // a full-duplex TG talkerForTG() is never set (the mixer owns the
+            // TG), so skip it — otherwise, in a trunk CHAIN, this return would
+            // drop incoming trunk AUDIO (and its onward resend) whenever a local
+            // talker holds the TG.
+            if (!TGHandler::instance()->fullDuplexForTG(msg.tg))
             {
-                std::cout << "Talker conflict on" << msg.tg << "\r\n";
-
-                return;
+                ReflectorClient* local_talker =
+                    TGHandler::instance()->talkerForTG(msg.tg);
+                if (local_talker != nullptr)
+                {
+                    std::cout << "Talker conflict on" << msg.tg << "\r\n";
+                    return;
+                }
             }
-
-
-
 
             msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, addr.toString());
 
@@ -6227,14 +6231,21 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
             cout << header_v3.talker << " -> Trunk "<< addr.toString() <<": Talker start on TG #" << header_v3.tg << endl;
 
-            // PTT talker handler 
-            ReflectorClient* local_talker = TGHandler::instance()->talkerForTG(header_v3.tg);
-
-            if (local_talker != nullptr)
+            // PTT talker handler. The single-talker conflict guard only makes
+            // sense on a HALF-duplex TG; on a full-duplex TG talkerForTG() is
+            // never set (the mixer owns the TG, no single-talker lock), so skip
+            // it there. Crucial in a trunk CHAIN: this return would otherwise
+            // stop an incoming trunk TalkerStart from propagating to the next
+            // hop whenever a local talker holds the TG.
+            if (!TGHandler::instance()->fullDuplexForTG(header_v3.tg))
             {
-                  std::cout << "Talker conflict on" << header_v3.tg << "\r\n";
-
-                return;
+                ReflectorClient* local_talker =
+                    TGHandler::instance()->talkerForTG(header_v3.tg);
+                if (local_talker != nullptr)
+                {
+                    std::cout << "Talker conflict on" << header_v3.tg << "\r\n";
+                    return;
+                }
             }
 
             //TGHandler::instance()->setTrunkTalkerForTG(header_v3.tg, header_v3.talker);
