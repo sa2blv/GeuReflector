@@ -555,6 +555,33 @@ void TGMixer::onTick(Async::Timer*)
     {
       minus[i] = full_sum[i] - (i < own.size() ? own[i] : 0.0f);
     }
+    // Also subtract any OTHER active source carrying the same callsign. That is
+    // this node's own audio looping back over a trunk/bridge (a separate source
+    // id, e.g. "u:<ip>", but the same talker callsign): a node must never hear
+    // itself, directly or via the mesh. Telephone / Asterisk full-duplex model.
+    // Empty callsign never matches, so mesh sources without a talker tag and
+    // base-version peers are unaffected (100% backward compatible).
+    if (!src->callsign.empty())
+    {
+      for (auto& kv2 : m_sources)
+      {
+        Source* other = kv2.second;
+        if ((other == src) || (other->callsign != src->callsign))
+        {
+          continue;
+        }
+        auto fit = frame_of.find(other);
+        if (fit == frame_of.end())
+        {
+          continue;
+        }
+        const std::vector<float>& oth = fit->second;
+        for (unsigned i = 0; i < m_frame_size; ++i)
+        {
+          minus[i] -= (i < oth.size() ? oth[i] : 0.0f);
+        }
+      }
+    }
     src->cur_out.clear();
     src->encoder->writeSamples(minus.data(), static_cast<int>(m_frame_size));
     if (!src->cur_out.empty())
