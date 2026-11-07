@@ -239,6 +239,16 @@ class TGHandler : public sigc::trackable
      */
     bool fullDuplexForTG(uint32_t tg) const;
 
+    /**
+     * The duplex configuration in a form a satellite can resolve itself
+     * (see MsgPeerDuplexInfo): GLOBAL DUPLEX_MODE, the FULL_DUPLEX_TGS ranges
+     * (unexpanded) and the [TG#n] DUPLEX_MODE overrides.
+     */
+    void duplexInfo(bool& default_full, std::vector<uint32_t>& full_lo,
+                    std::vector<uint32_t>& full_hi,
+                    std::vector<uint32_t>& force_full,
+                    std::vector<uint32_t>& force_half) const;
+
     // --- QSY config resolution (per-TG [TG#n] overrides GLOBAL) ----------
     // Seconds of idle before an automatic QSY; 0 = disabled. Per-TG then
     // GLOBAL AUTO_QSY_AFTER.

@@ -2,6 +2,7 @@
 #define SATELLITE_LINK_INCLUDED
 
 #include <set>
+#include <map>
 #include <string>
 #include <vector>
 #include <sigc++/sigc++.h>
@@ -103,6 +104,9 @@ class SatelliteLink : public sigc::trackable
     unsigned                    m_hb_tx_cnt;
     unsigned                    m_hb_rx_cnt;
     std::set<uint32_t>          m_sat_active_tgs;
+    std::map<uint32_t, std::string> m_sat_talker_cs;  // full-duplex TGs: talker callsign
+    std::string                 m_duplex_sig;          // last MsgPeerDuplexInfo sent
+    unsigned                    m_duplex_check_cnt = 0;
     TgFilter                    m_tg_filter;
     std::set<uint32_t>          m_tg_interest;
     // Roster of clients attached to this satellite, learned via
@@ -129,6 +133,18 @@ class SatelliteLink : public sigc::trackable
     void handleMsgPeerClientStatus(std::istream& is);
     void sendMsg(const ReflectorMsg& msg);
     void heartbeatTick(Async::Timer* t);
+    void sendDuplexInfo(void);
+    std::string mixerId(void) const { return "s:" + m_satellite_id; }
+
+  public:
+    // Full-duplex TG: the callsign this satellite is talking with ("" = none)
+    std::string fdxTalker(uint32_t tg) const
+    {
+      auto it = m_sat_talker_cs.find(tg);
+      return (it != m_sat_talker_cs.end()) ? it->second : std::string();
+    }
+
+  private:
 };
 
 #endif /* SATELLITE_LINK_INCLUDED */

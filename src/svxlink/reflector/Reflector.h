@@ -364,6 +364,16 @@ class Reflector : public sigc::trackable
                               const std::vector<uint8_t>& audio,
                               const std::string& callsign = "");
 
+    /** Feed a satellite's audio into a full-duplex TG's mixer as a LOCAL
+     *  source ("s:<satellite id>"): a satellite is downstream-local to us,
+     *  so its audio is part of local_mix toward the mesh, it drives
+     *  talker-start/stop like a client, and it gets mix-minus-self back. */
+    void feedSatelliteAudioToMixer(uint32_t tg, const std::string& srcid,
+                                   const std::vector<uint8_t>& audio,
+                                   const std::string& callsign);
+    /** Drop a satellite's source from all mixers (satellite disconnected). */
+    void removeSatelliteFromMixers(const std::string& srcid);
+
     /**
      * Resolve the HMAC secret to verify a satellite's MsgPeerHello.
      *

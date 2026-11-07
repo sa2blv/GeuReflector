@@ -2053,6 +2053,41 @@ void Reflector::feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
 } /* Reflector::feedMeshAudioToMixer */
 
 
+void Reflector::feedSatelliteAudioToMixer(uint32_t tg, const std::string& srcid,
+                                          const std::vector<uint8_t>& audio,
+                                          const std::string& callsign)
+{
+  if (audio.empty())
+  {
+    return;
+  }
+  TGMixer* mx = getOrCreateMixer(tg);
+  if (mx != nullptr)
+  {
+    mx->writeOpus(srcid, audio, /*local=*/true, callsign);
+  }
+} /* Reflector::feedSatelliteAudioToMixer */
+
+
+void Reflector::removeSatelliteFromMixers(const std::string& srcid)
+{
+  for (auto it = m_tg_mixers.begin(); it != m_tg_mixers.end(); )
+  {
+    TGMixer* mx = it->second;
+    mx->removeSource(srcid);
+    if (mx->sourceCount() == 0)
+    {
+      delete mx;
+      it = m_tg_mixers.erase(it);
+    }
+    else
+    {
+      ++it;
+    }
+  }
+} /* Reflector::removeSatelliteFromMixers */
+
+
 void Reflector::onMixReady(const MixResult& result)
 {
   // --- Local clients: mix-minus-self to active sources, full mix to the
@@ -2079,9 +2114,31 @@ void Reflector::onMixReady(const MixResult& result)
     }
   }
 
+  // --- Satellites are downstream-local: like clients they get the FULL mix
+  //     (trunk/mesh audio included), minus their own contribution when they
+  //     are an active source. One stream per TG, never the raw trunk relay
+  //     on top (that path is skipped for full-duplex TGs). ---
+  for (auto& kv : m_satellite_con_map)
+  {
+    SatelliteLink* sat = kv.second;
+    if (sat == nullptr || sat->satelliteId().empty()) continue;
+    auto pit = result.per_source.find("s:" + sat->satelliteId());
+    if (pit != result.per_source.end())
+    {
+      if (!pit->second.empty())
+      {
+        sat->onParentAudio(result.tg, pit->second);
+      }
+    }
+    else if (!result.full.empty())
+    {
+      sat->onParentAudio(result.tg, result.full);
+    }
+  }
+
   // --- Mesh: this reflector's LOCAL sub-mix only (never mesh-sourced audio,
   //     so it can never loop back) goes out as ONE collapsed stream on both
-  //     the UDP trunk and the TCP/satellite/twin links. ---
+  //     the UDP trunk and the TCP/twin links. ---
   if (!result.local_mix.empty())
   {
     MsgUdpAudio_trunk msg_trunk;
@@ -2100,10 +2157,6 @@ void Reflector::onMixReady(const MixResult& result)
       {
         link->onLocalAudio(result.tg, result.local_mix);
       }
-      for (auto& kv : m_satellite_con_map)
-      {
-        kv.second->onParentAudio(result.tg, result.local_mix);
-      }
       if (m_twin_link != nullptr)
       {
         m_twin_link->onLocalAudio(result.tg, result.local_mix);
@@ -2116,10 +2169,12 @@ void Reflector::onMixReady(const MixResult& result)
 void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
                                  const std::string& callsign, bool active)
 {
-  // Only LOCAL sources ("c:<clientId>") drive talker-start/stop here. Mesh
-  // sources are signalled to peers by the originating reflector's own
-  // collapse, so ignore them here to avoid double signalling.
-  if (id.rfind("c:", 0) != 0)
+  // Only LOCAL sources ("c:<clientId>", and satellites "s:<id>") drive
+  // talker-start/stop here. Mesh sources are signalled to peers by the
+  // originating reflector's own collapse, so ignore them here to avoid
+  // double signalling.
+  const bool is_sat = (id.rfind("s:", 0) == 0);
+  if ((id.rfind("c:", 0) != 0) && !is_sat)
   {
     return;
   }
@@ -2128,6 +2183,7 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   ReflectorClient* client = nullptr;
   try
   {
+    if (is_sat) throw 0;
     ReflectorClient::ClientId cid =
         static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
     const TGHandler::ClientSet& cl = TGHandler::instance()->clientsForTG(tg);
@@ -3543,8 +3599,10 @@ void Reflector::satelliteDisconnected(Async::FramedTcpConnection* con,
     if (m_redis != nullptr) {
       m_redis->clearSatelliteStatus(it->second->satelliteId());
     }
+    const std::string mix_id = "s:" + it->second->satelliteId();
     delete it->second;
     m_satellite_con_map.erase(it);
+    removeSatelliteFromMixers(mix_id);
     publishMetaToRedis();
     scheduleTgInterestUpdate();
   }
@@ -3583,8 +3641,10 @@ void Reflector::processSatelliteCleanup(Async::Timer* t)
     if (m_redis != nullptr) {
       m_redis->clearSatelliteStatus(link->satelliteId());
     }
+    const std::string mix_id = "s:" + link->satelliteId();
     delete link;
     m_satellite_con_map.erase(con);
+    removeSatelliteFromMixers(mix_id);
     scheduleTgInterestUpdate();
     con->disconnect();
     publishMetaToRedis();
@@ -6147,6 +6207,16 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
                         return;
                     }
                 }
+                // ... or one of our satellites talking on a full-duplex TG
+                // (e.g. a PBX caller): its own audio is already in the mix.
+                for (auto& kv : m_satellite_con_map)
+                {
+                    if ((kv.second != nullptr) &&
+                        (kv.second->fdxTalker(msg.tg) == trunk_cs))
+                    {
+                        return;
+                    }
+                }
             }
 
             if (TGHandler::instance()->fullDuplexForTG(msg.tg))
@@ -6212,9 +6282,14 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
                 }
             }
 
-            for (auto& kv : m_satellite_con_map)
+            // Full-duplex TGs reach satellites through the mixer (onMixReady),
+            // so the raw relay would give them a second, overlapping stream.
+            if (!TGHandler::instance()->fullDuplexForTG(msg.tg))
             {
-                kv.second->onParentAudio(msg.tg, msg.audioData());
+              for (auto& kv : m_satellite_con_map)
+              {
+                  kv.second->onParentAudio(msg.tg, msg.audioData());
+              }
             }
 
 

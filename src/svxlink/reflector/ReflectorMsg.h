@@ -2174,6 +2174,42 @@ class MsgPeerQsy : public ReflectorMsgBase<130>
 
 
 /**
+@brief   Parent -> satellite: which TGs are full duplex (mixed) here
+@date    2026-11-07
+
+Sent by the parent after the satellite has authenticated and again whenever
+the duplex configuration changes (checked on the heartbeat). Resolution on the
+satellite mirrors TGHandler::fullDuplexForTG():
+  tg in force_half -> half, tg in force_full -> full ([TG#n] DUPLEX_MODE),
+  tg in [full_lo[i], full_hi[i]] -> full (GLOBAL FULL_DUPLEX_TGS),
+  otherwise default_full (GLOBAL DUPLEX_MODE).
+On a full-duplex TG the satellite may transmit while others talk; it is a
+source in the TG mixer and receives mix-minus-self. Satellites that do not
+know the message ignore it.
+*/
+class MsgPeerDuplexInfo : public ReflectorMsgBase<131>
+{
+  public:
+    MsgPeerDuplexInfo(void) : m_default_full(0) {}
+    MsgPeerDuplexInfo(bool default_full,
+                      const std::vector<uint32_t>& full_lo,
+                      const std::vector<uint32_t>& full_hi,
+                      const std::vector<uint32_t>& force_full,
+                      const std::vector<uint32_t>& force_half)
+      : m_default_full(default_full ? 1 : 0), m_full_lo(full_lo),
+        m_full_hi(full_hi), m_force_full(force_full), m_force_half(force_half) {}
+    ASYNC_MSG_MEMBERS(m_default_full, m_full_lo, m_full_hi, m_force_full,
+                      m_force_half)
+  private:
+    uint8_t               m_default_full;
+    std::vector<uint32_t> m_full_lo;
+    std::vector<uint32_t> m_full_hi;
+    std::vector<uint32_t> m_force_full;
+    std::vector<uint32_t> m_force_half;
+}; /* MsgPeerDuplexInfo */
+
+
+/**
 @brief   A namespace for stautsmessages
 @author  Peter Lundberg /SA2BLV
 @date    2026-01-10

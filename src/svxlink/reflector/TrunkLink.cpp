@@ -1268,8 +1268,12 @@ void TrunkLink::handleMsgPeerAudio(std::istream& is)
   // Resend to BLV sub trunk
   m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, local_tg, Trunk_type_send);
     
-  // Forward trunk audio to connected satellites
-  m_reflector->forwardAudioToSatellitesExcept(nullptr, deliver_tg, msg.audio());
+  // Forward trunk audio to connected satellites. On a full-duplex TG the
+  // mixer delivers it (full mix, mix-minus-self) in Reflector::onMixReady.
+  if (!TGHandler::instance()->fullDuplexForTG(deliver_tg))
+  {
+    m_reflector->forwardAudioToSatellitesExcept(nullptr, deliver_tg, msg.audio());
+  }
 
   // Mirror inbound trunk audio to the [TWIN] partner so PAIRED inbound
   // (sticky on one twin) still reaches the non-sticky twin's local clients

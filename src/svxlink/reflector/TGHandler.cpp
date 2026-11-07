@@ -620,6 +620,63 @@ bool TGHandler::fullDuplexForTG(uint32_t tg) const
 } /* TGHandler::fullDuplexForTG */
 
 
+void TGHandler::duplexInfo(bool& default_full, std::vector<uint32_t>& full_lo,
+                           std::vector<uint32_t>& full_hi,
+                           std::vector<uint32_t>& force_full,
+                           std::vector<uint32_t>& force_half) const
+{
+  default_full = false;
+  full_lo.clear(); full_hi.clear(); force_full.clear(); force_half.clear();
+  if (m_cfg == nullptr) { return; }
+
+  std::string gmode;
+  if (m_cfg->getValue("GLOBAL", "DUPLEX_MODE", gmode) && !gmode.empty())
+  {
+    default_full = (fdx_lc(gmode) == "full");
+  }
+
+  std::string list;
+  if (m_cfg->getValue("GLOBAL", "FULL_DUPLEX_TGS", list) && !list.empty())
+  {
+    std::stringstream ss(list);
+    std::string tok;
+    while (std::getline(ss, tok, ',') && (full_lo.size() < 1000))
+    {
+      tok.erase(std::remove_if(tok.begin(), tok.end(),
+            [](unsigned char c){ return std::isspace(c); }), tok.end());
+      if (tok.empty()) { continue; }
+      try
+      {
+        std::size_t dash = tok.find('-');
+        uint32_t lo = static_cast<uint32_t>(std::stoul(tok.substr(0, dash)));
+        uint32_t hi = (dash == std::string::npos) ? lo
+            : static_cast<uint32_t>(std::stoul(tok.substr(dash + 1)));
+        if (lo > hi) { std::swap(lo, hi); }
+        full_lo.push_back(lo);
+        full_hi.push_back(hi);
+      }
+      catch (...) { /* skip malformed token */ }
+    }
+  }
+
+  // [TG#n] DUPLEX_MODE overrides. listSections() is not const in Async::Config.
+  Async::Config* cfg = const_cast<Async::Config*>(m_cfg);
+  for (const std::string& sec : cfg->listSections())
+  {
+    if (sec.rfind("TG#", 0) != 0) { continue; }
+    std::string mode;
+    if (!m_cfg->getValue(sec, "DUPLEX_MODE", mode) || mode.empty()) { continue; }
+    try
+    {
+      uint32_t tg = static_cast<uint32_t>(std::stoul(sec.substr(3)));
+      ((fdx_lc(mode) == "full") ? force_full : force_half).push_back(tg);
+    }
+    catch (...) { /* not a numeric TG section */ }
+    if (force_full.size() + force_half.size() >= 1000) { break; }
+  }
+} /* TGHandler::duplexInfo */
+
+
 bool TGHandler::qsyBoolForTG(uint32_t tg, const char* key, bool def) const
 {
   if (m_cfg == nullptr) { return def; }

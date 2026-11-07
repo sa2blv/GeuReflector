@@ -349,6 +349,10 @@ void SatelliteLink::handleMsgPeerHello(std::istream& is)
   sendMsg(MsgPeerHello("PARENT", "", 0, m_resolved_secret,
                        MsgPeerHello::ROLE_PEER));
 
+  // Tell the satellite which TGs are full duplex (mixed) here.
+  m_duplex_sig.clear();
+  sendDuplexInfo();
+
   // Bring the new satellite up to speed: schedule a debounced node-list
   // emission so it receives the parent's combined view (parent-local
   // + every sibling satellite, minus its own contribution).
@@ -364,6 +368,18 @@ void SatelliteLink::handleMsgPeerTalkerStart(std::istream& is)
   if (!msg.unpack(is)) return;
 
   uint32_t tg = msg.tg();
+
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Full duplex: the satellite is a LOCAL source in the TG mixer. Talker
+    // start/stop toward clients and ONE collapsed mesh talker come from the
+    // mixer's source activity (Reflector::onSourceActivity), so nothing is
+    // registered or forwarded here; just remember the callsign for the mix.
+    m_sat_active_tgs.insert(tg);
+    m_sat_talker_cs[tg] = msg.callsign();
+    statusChanged(this);
+    return;
+  }
 
   // Register as trunk talker — fires trunkTalkerUpdated which notifies
   // local clients. Reflector::onTrunkTalkerUpdated also forwards to
@@ -389,6 +405,13 @@ void SatelliteLink::handleMsgPeerTalkerStop(std::istream& is)
 
   uint32_t tg = msg.tg();
   m_sat_active_tgs.erase(tg);
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Full duplex: the mixer's hangover ends the source's activity.
+    m_sat_talker_cs.erase(tg);
+    statusChanged(this);
+    return;
+  }
   TGHandler::instance()->clearTrunkTalkerForTG(tg);
 
   // Forward stop to trunk peers
@@ -409,6 +432,17 @@ void SatelliteLink::handleMsgPeerAudio(std::istream& is)
   uint32_t tg = msg.tg();
   if (msg.audio().empty()) return;
   if (m_sat_active_tgs.find(tg) == m_sat_active_tgs.end()) return;
+
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Full duplex: blend into the TG mixer as a LOCAL source ("s:<id>"), so
+    // it mixes with the reflector's own talkers, reaches clients as a single
+    // stream, goes out to the mesh inside local_mix and comes back to this
+    // satellite as mix-minus-self (Reflector::onMixReady).
+    m_reflector->feedSatelliteAudioToMixer(tg, mixerId(), msg.audio(),
+                                           m_sat_talker_cs[tg]);
+    return;
+  }
 
   // Broadcast to local clients on the parent — both selected and monitoring.
   MsgUdpAudio udp_msg(msg.audio());
@@ -441,6 +475,7 @@ void SatelliteLink::handleMsgPeerFlush(std::istream& is)
   if (!msg.unpack(is)) return;
 
   uint32_t tg = msg.tg();
+  if (TGHandler::instance()->fullDuplexForTG(tg)) return;  // the mixer owns the TG
 
   m_reflector->broadcastUdpMsg(MsgUdpFlushSamples(),
       ReflectorClient::mkOrFilter(
@@ -475,8 +510,38 @@ void SatelliteLink::sendMsg(const ReflectorMsg& msg)
 } /* SatelliteLink::sendMsg */
 
 
+void SatelliteLink::sendDuplexInfo(void)
+{
+  if (!m_hello_received) return;
+  bool def_full = false;
+  std::vector<uint32_t> lo, hi, ffull, fhalf;
+  TGHandler::instance()->duplexInfo(def_full, lo, hi, ffull, fhalf);
+  std::ostringstream sig;
+  sig << def_full << '|';
+  for (size_t i = 0; i < lo.size(); ++i) sig << lo[i] << '-' << hi[i] << ',';
+  sig << '|';
+  for (uint32_t tg : ffull) sig << tg << ',';
+  sig << '|';
+  for (uint32_t tg : fhalf) sig << tg << ',';
+  if (sig.str() == m_duplex_sig) return;
+  m_duplex_sig = sig.str();
+  sendMsg(MsgPeerDuplexInfo(def_full, lo, hi, ffull, fhalf));
+  geulog::info("satellite", "Satellite '", m_satellite_id,
+               "': duplex info sent (default ", def_full ? "full" : "half",
+               ", ", lo.size(), " full range(s), ", ffull.size(), " full / ",
+               fhalf.size(), " half TG override(s))");
+} /* SatelliteLink::sendDuplexInfo */
+
+
 void SatelliteLink::heartbeatTick(Async::Timer* t)
 {
+  // Pick up duplex configuration changes (e.g. via the PTY CFG command).
+  if (++m_duplex_check_cnt >= 10)
+  {
+    m_duplex_check_cnt = 0;
+    sendDuplexInfo();
+  }
+
   if (--m_hb_tx_cnt == 0)
   {
     m_hb_tx_cnt = HEARTBEAT_TX_CNT_RESET;
