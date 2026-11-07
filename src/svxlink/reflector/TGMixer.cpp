@@ -151,9 +151,18 @@ TGMixer::TGMixer(uint32_t tg, const Async::Config& cfg)
   {
     m_prebuf_size = m_frame_size;
   }
-  // Hangover: keep a source "active" ~200 ms past its last audio so brief
-  // gaps between packets do not flap the mix-minus-self routing.
-  m_hangover_frames = (200 + m_frame_ms - 1) / m_frame_ms;
+  // Hangover: keep a source "active" past its last audio so brief gaps between
+  // packets do not flap the talker-start/stop or the mix-minus-self routing.
+  // Configurable; default raised to 500 ms so a steady but jittery source
+  // (a trunk/bridge, or a node whose packets arrive unevenly — duplex or not)
+  // is not declared idle on short gaps. MIX_HANGOVER_MS overrides per-TG/GLOBAL.
+  unsigned hangover_ms = cfgUnsigned(cfg, tg, "MIX_HANGOVER_MS", 500, 0, 5000);
+  m_hangover_frames = (hangover_ms + m_frame_ms - 1) / m_frame_ms;
+  // Only rebuild the jitter buffer (which injects a prebuffer of silence) after
+  // a SUSTAINED outage, not on every late/partial frame — so transient network
+  // jitter from a trunk source is absorbed instead of chopping the audio.
+  unsigned reprebuf_ms = cfgUnsigned(cfg, tg, "MIX_REPREBUF_MS", 300, 20, 2000);
+  m_reprebuf_frames = (reprebuf_ms + m_frame_ms - 1) / m_frame_ms;
   m_source_timeout_frames = (src_timeout_ms + m_frame_ms - 1) / m_frame_ms;
 
   m_full_encoder = makeEncoder();
@@ -384,8 +393,22 @@ void TGMixer::onTick(Async::Timer*)
     }
     if (avail < m_frame_size)
     {
-      // Underrun: rebuild the jitter buffer before contributing again.
-      if (m_prebuf_size > 0) { src->prebuffering = true; }
+      // Short/empty frame. Tolerate transient jitter: the tail of `pcm` is
+      // already zero-filled past `avail`, so we still contribute this frame and
+      // keep the source active. Only after a SUSTAINED outage do we rebuild the
+      // jitter buffer (which would inject a prebuffer of silence). This stops a
+      // steady but jittery source — a trunk/bridge or an uneven node, duplex or
+      // half-duplex — from being chopped every time a single packet is late.
+      src->underrun_frames++;
+      if ((m_prebuf_size > 0) && (src->underrun_frames >= m_reprebuf_frames))
+      {
+        src->prebuffering = true;
+        src->underrun_frames = 0;
+      }
+    }
+    else
+    {
+      src->underrun_frames = 0;
     }
 
     if (has_audio)
