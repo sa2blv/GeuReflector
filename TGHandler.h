@@ -1,0 +1,339 @@
+/**
+@file   TGHandler.h
+@brief  A class for handling talk groups
+@author Tobias Blomberg / SM0SVX
+@date   2019-07-25
+
+\verbatim
+SvxReflector - An audio reflector for connecting SvxLink Servers
+Copyright (C) 2003-2024 Tobias Blomberg / SM0SVX
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+\endverbatim
+*/
+
+#ifndef TG_HANDLER_INCLUDED
+#define TG_HANDLER_INCLUDED
+
+
+/****************************************************************************
+ *
+ * System Includes
+ *
+ ****************************************************************************/
+
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+#include <sigc++/sigc++.h>
+#include <sys/time.h>
+
+
+/****************************************************************************
+ *
+ * Project Includes
+ *
+ ****************************************************************************/
+
+#include <AsyncConfig.h>
+
+
+/****************************************************************************
+ *
+ * Local Includes
+ *
+ ****************************************************************************/
+
+#include "ReflectorClient.h"
+
+
+/****************************************************************************
+ *
+ * Forward declarations
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Namespace
+ *
+ ****************************************************************************/
+
+//namespace MyNameSpace
+//{
+
+
+/****************************************************************************
+ *
+ * Forward declarations of classes inside of the declared namespace
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Defines & typedefs
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Exported Global Variables
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Class definitions
+ *
+ ****************************************************************************/
+
+/**
+@brief  Handle talk groups
+@author Tobias Blomberg / SM0SVX
+@date   2019-07-25
+
+This class is responsible for keeping track of all talk groups that are used in
+the system.
+*/
+class TGHandler : public sigc::trackable
+{
+  public:
+    typedef std::set<ReflectorClient*> ClientSet;
+
+    static TGHandler* instance(void)
+    {
+      static TGHandler *tg_handler = new TGHandler;
+      return tg_handler;
+    }
+
+    /**
+     * @brief   Default constructor
+     */
+    TGHandler(void);
+
+    /**
+     * @brief   Destructor
+     */
+    ~TGHandler(void);
+
+    /**
+     * @brief   A_brief_member_function_description
+     * @param   param1 Description_of_param1
+     * @return  Return_value_of_this_member_function
+     */
+    void setConfig(const Async::Config* cfg) { m_cfg = cfg; }
+
+    unsigned sqlTimeout(void) const { return m_sql_timeout; }
+    void setSqlTimeout(unsigned sql_timeout) { m_sql_timeout = sql_timeout; }
+
+    unsigned sqlTimeoutBlocktime(void) const
+    {
+      return m_sql_timeout_blocktime;
+    }
+    void setSqlTimeoutBlocktime(unsigned sql_timeout_blocktime);
+
+    bool switchTo(ReflectorClient *client, uint32_t tg);
+
+    void removeClient(ReflectorClient* client);
+
+    const ClientSet& clientsForTG(uint32_t tg) const;
+
+    void setTalkerForTG(uint32_t tg, ReflectorClient* client);
+
+    ReflectorClient* talkerForTG(uint32_t tg) const;
+
+    /**
+     * @brief Look up the wall-clock time (gettimeofday) at which the
+     *        current talker — or, if no talker is currently set, the most
+     *        recent talker — took TG `tg`. The value persists across
+     *        talker-clear so the audio-flush fanout filter can still
+     *        identify the freshly-stopped TG.
+     * @return true iff a start time has ever been recorded for `tg`.
+     */
+    bool talkerStartTimeForTG(uint32_t tg, struct timeval& out) const;
+
+    uint32_t TGForClient(ReflectorClient* client);
+
+    void setTrunkTalkerForTG(uint32_t tg, const std::string& callsign);
+    void clearTrunkTalkerForTG(uint32_t tg);
+    void clearAllTrunkTalkers(void);
+    std::string trunkTalkerForTG(uint32_t tg) const;
+    bool hasTrunkTalker(uint32_t tg) const;
+
+    /**
+     * @brief Same as `talkerStartTimeForTG` but for trunk-sourced talkers.
+     *        Persists across `clearTrunkTalkerForTG` for the same reason.
+     */
+    bool trunkTalkerStartTimeForTG(uint32_t tg, struct timeval& out) const;
+    const std::map<uint32_t, std::string>& trunkTalkersSnapshot(void) const
+    {
+      return m_trunk_talkers;
+    }
+
+    /**
+     * @brief   Like setTrunkTalkerForTG, but also records which external
+     *          peer (by TRUNK section id) holds the TG.  Used by the twin
+     *          link so state can be cleaned up per-peer on disconnect.
+     *
+     * Passing an empty callsign clears the talker for this TG.
+     */
+    void setTrunkTalkerForTGViaPeer(uint32_t tg,
+                                    const std::string& callsign,
+                                    const std::string& peer_id);
+
+    /**
+     * @brief   Clear all trunk-talker entries attributed to a given peer
+     *          (e.g. when that peer's trunk disconnects).
+     */
+    void clearTrunkTalkersForPeer(const std::string& peer_id);
+
+    /**
+     * @brief   Return the peer_id that holds the TG, or "" if none.
+     */
+    std::string peerIdForTG(uint32_t tg) const;
+
+    bool allowTgSelection(ReflectorClient *client, uint32_t tg);
+
+    bool allowTgMonitoring(ReflectorClient *client, uint32_t tg);
+
+    bool showActivity(uint32_t tg) const;
+
+    bool isRestricted(uint32_t tg) const;
+
+    /**
+     * @brief   Resolve the duplex mode for a talk group.
+     * @param   tg The talk group id.
+     * @return  true for full-duplex (per-TG audio mixing), false for
+     *          half-duplex (single-talker, legacy behaviour).
+     *
+     * Resolution order (first match wins), all config driven:
+     *   1. [TG#<tg>] DUPLEX_MODE = full|half  (explicit per-TG, always wins)
+     *   2. [GLOBAL]  FULL_DUPLEX_TGS list      (tg in set -> full)
+     *   3. [GLOBAL]  DUPLEX_MODE = full|half
+     *   4. otherwise half (legacy single-talker, unchanged)
+     *
+     * FULL_DUPLEX_TGS accepts a mixed comma list of single TGs and ranges,
+     * e.g. "91,240,300-310,500". Whitespace is ignored. Default (nothing
+     * set) is half everywhere, i.e. byte-identical legacy behaviour.
+     */
+    bool fullDuplexForTG(uint32_t tg) const;
+
+    /**
+     * The duplex configuration in a form a satellite can resolve itself
+     * (see MsgPeerDuplexInfo): GLOBAL DUPLEX_MODE, the FULL_DUPLEX_TGS ranges
+     * (unexpanded) and the [TG#n] DUPLEX_MODE overrides.
+     */
+    void duplexInfo(bool& default_full, std::vector<uint32_t>& full_lo,
+                    std::vector<uint32_t>& full_hi,
+                    std::vector<uint32_t>& force_full,
+                    std::vector<uint32_t>& force_half) const;
+
+    // --- QSY config resolution (per-TG [TG#n] overrides GLOBAL) ----------
+    // Seconds of idle before an automatic QSY; 0 = disabled. Per-TG then
+    // GLOBAL AUTO_QSY_AFTER.
+    time_t autoQsyAfterForTG(uint32_t tg) const;
+    // Whether idle auto-QSY is active. Explicit AUTO_QSY (per-TG then GLOBAL)
+    // wins; legacy default = enabled iff AUTO_QSY_AFTER>0 (old setups
+    // unchanged).
+    bool   autoQsyEnabledForTG(uint32_t tg) const;
+    // Whether a client/DTMF-requested QSY is honoured (QSY_ENABLE, default 1).
+    bool   qsyEnableForTG(uint32_t tg) const;
+    // Whether a QSY received from the mesh is honoured (QSY_FOLLOW, default 1).
+    bool   qsyFollowForTG(uint32_t tg) const;
+    // Allowed QSY target pool (QSY_TGS mixed list/range "x,x-x,x"), per-TG
+    // then GLOBAL, expanded to explicit TGs. Empty => not configured (the
+    // caller falls back to RANDOM_QSY_RANGE).
+    std::vector<uint32_t> qsyTgsForTG(uint32_t tg) const;
+    // Generic per-TG-then-GLOBAL bool config resolver.
+    bool   qsyBoolForTG(uint32_t tg, const char* key, bool def) const;
+
+    sigc::signal<void(uint32_t,
+      ReflectorClient*, ReflectorClient*)> talkerUpdated;
+
+    sigc::signal<void(uint32_t)> requestAutoQsy;
+
+    // Fired when a trunk peer claims or releases a TG.
+    // Args: tg, old_callsign ("" = none), new_callsign ("" = none),
+    //       peer_id (the peer that originated the event, "" if unknown)
+    sigc::signal<void(uint32_t,
+      std::string, std::string,
+      std::string)> trunkTalkerUpdated;
+
+  private:
+    static const time_t TALKER_AUDIO_TIMEOUT = 3; // Max three seconds gap
+    static const size_t MAX_ACTIVE_TGS       = 10000;
+    static const size_t MAX_TRUNK_TALKERS     = 10000;
+
+    struct TGInfo
+    {
+      uint32_t          id;
+      ClientSet         clients;
+      ReflectorClient*  talker;
+      struct timeval    last_talker_timestamp;
+      // Wall-clock time at which the current (or most recent) talker took
+      // this TG. Retained across talker-clear so flush fanout can identify
+      // the freshly-stopped TG.
+      struct timeval    talker_start_timestamp;
+      unsigned          sql_timeout_cnt;
+      time_t            auto_qsy_after_s;
+      time_t            auto_qsy_time;
+
+      TGInfo(uint32_t tg)
+        : id(tg), talker(0), sql_timeout_cnt(0), auto_qsy_after_s(0),
+          auto_qsy_time(-1)
+      {
+        timerclear(&last_talker_timestamp);
+        timerclear(&talker_start_timestamp);
+      }
+    };
+    typedef std::map<uint32_t, TGInfo*>               IdMap;
+    typedef std::map<const ReflectorClient*, TGInfo*> ClientMap;
+
+    const Async::Config*             m_cfg;
+    IdMap                            m_id_map;
+    ClientMap                        m_client_map;
+    std::map<uint32_t, std::string>  m_trunk_talkers;
+    std::map<uint32_t, std::string>  m_trunk_talker_peer_ids;  // tg -> peer_id
+    // Wall-clock start time for the current (or most recent) trunk talker.
+    // Retained across clearTrunkTalkerForTG to support flush filtering.
+    std::map<uint32_t, struct timeval> m_trunk_talker_start_times;
+    Async::Timer                     m_timeout_timer;
+    unsigned                         m_sql_timeout;
+    unsigned                         m_sql_timeout_blocktime;
+
+    TGHandler(const TGHandler&);
+    TGHandler& operator=(const TGHandler&);
+    void checkTimers(Async::Timer *t);
+    void removeClientP(TGInfo *tg_info, ReflectorClient* client);
+    void printTGStatus(void);
+};  /* class TGHandler */
+
+
+//} /* namespace */
+
+#endif /* TG_HANDLER_INCLUDED */
+
+/*
+ * This file has not been truncated
+ */

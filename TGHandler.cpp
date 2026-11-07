@@ -1,0 +1,844 @@
+/**
+@file   TGHandler.cpp
+@brief  A class for handling talk groups
+@author Tobias Blomberg / SM0SVX
+@date   2019-07-26
+
+\verbatim
+SvxReflector - An audio reflector for connecting SvxLink Servers
+Copyright (C) 2003-2021 Tobias Blomberg / SM0SVX
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+\endverbatim
+*/
+
+/****************************************************************************
+ *
+ * System Includes
+ *
+ ****************************************************************************/
+
+#include <iostream>
+#include <cassert>
+#include <algorithm>
+#include <sstream>
+#include <vector>
+#include <regex>
+#include <cctype>
+#include <Log.h>
+
+
+/****************************************************************************
+ *
+ * Project Includes
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Local Includes
+ *
+ ****************************************************************************/
+
+#include "TGHandler.h"
+
+
+/****************************************************************************
+ *
+ * Namespaces to use
+ *
+ ****************************************************************************/
+
+using namespace std;
+
+
+/****************************************************************************
+ *
+ * Defines & typedefs
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Local class definitions
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Prototypes
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Exported Global Variables
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Local Global Variables
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Public member functions
+ *
+ ****************************************************************************/
+
+TGHandler::TGHandler(void)
+  : m_cfg(0), m_timeout_timer(1000, Async::Timer::TYPE_PERIODIC),
+    m_sql_timeout(0), m_sql_timeout_blocktime(60)
+{
+  m_timeout_timer.expired.connect(
+      mem_fun(*this, &TGHandler::checkTimers));
+} /* TGHandler::TGHandler */
+
+
+TGHandler::~TGHandler(void)
+{
+  for (IdMap::iterator it = m_id_map.begin(); it != m_id_map.end(); ++it)
+  {
+    TGInfo* tg_info = it->second;
+    delete tg_info;
+  }
+} /* TGHandler::~TGHandler */
+
+
+void TGHandler::setSqlTimeoutBlocktime(unsigned sql_timeout_blocktime)
+{
+  m_sql_timeout_blocktime = std::max(sql_timeout_blocktime, 1U);
+} /* TGHandler::setSqlTimeoutBlocktime */
+
+
+bool TGHandler::switchTo(ReflectorClient *client, uint32_t tg)
+{
+  TGInfo *tg_info = 0;
+  ClientMap::iterator client_map_it = m_client_map.find(client);
+  if (client_map_it != m_client_map.end())
+  {
+    tg_info = client_map_it->second;
+    assert(tg_info != 0);
+    if (tg_info->id == tg)
+    {
+      return true;
+    }
+    removeClientP(tg_info, client);
+  }
+
+  if (tg > 0)
+  {
+    if (!allowTgSelection(client, tg))
+    {
+      return false;
+    }
+    IdMap::iterator id_map_it = m_id_map.find(tg);
+    if (id_map_it != m_id_map.end())
+    {
+      tg_info = id_map_it->second;
+    }
+    else
+    {
+      if (m_id_map.size() >= MAX_ACTIVE_TGS)
+      {
+        geulog::warn("core", "Maximum active TG limit (",
+                     static_cast<size_t>(MAX_ACTIVE_TGS),
+                     ") reached, rejecting TG #", tg);
+        return false;
+      }
+      tg_info = new TGInfo(tg);
+      // Per-TG AUTO_QSY_AFTER, else GLOBAL (was per-TG only before).
+      tg_info->auto_qsy_after_s = autoQsyAfterForTG(tg);
+      m_id_map[tg] = tg_info;
+    }
+    tg_info->clients.insert(client);
+    m_client_map[client] = tg_info;
+  }
+
+  //printTGStatus();
+
+  return true;
+} /* TGHandler::switchTo */
+
+
+void TGHandler::removeClient(ReflectorClient* client)
+{
+  ClientMap::iterator client_map_it = m_client_map.find(client);
+  if (client_map_it != m_client_map.end())
+  {
+    TGInfo* tg_info = client_map_it->second;
+    if (tg_info->talker == client)
+    {
+      setTalkerForTG(tg_info->id, 0);
+    }
+    removeClientP(tg_info, client);
+    //printTGStatus();
+  }
+} /* TGHandler::removeClient */
+
+
+const TGHandler::ClientSet& TGHandler::clientsForTG(uint32_t tg) const
+{
+  static const TGHandler::ClientSet empty_set;
+  IdMap::const_iterator id_map_it = m_id_map.find(tg);
+  if (id_map_it == m_id_map.end())
+  {
+    return empty_set;
+  }
+  return id_map_it->second->clients;
+} /* TGHandler::clientsForTG */
+
+
+void TGHandler::setTalkerForTG(uint32_t tg, ReflectorClient* new_talker)
+{
+  IdMap::const_iterator id_map_it = m_id_map.find(tg);
+  if (id_map_it == m_id_map.end())
+  {
+    return;
+  }
+  TGInfo* tg_info = id_map_it->second;
+  ReflectorClient* old_talker = tg_info->talker;
+  if (new_talker == old_talker)
+  {
+    gettimeofday(&tg_info->last_talker_timestamp, NULL);
+    return;
+  }
+  tg_info->sql_timeout_cnt = (new_talker != 0) ? m_sql_timeout : 0;
+  id_map_it->second->talker = new_talker;
+  if (new_talker != 0)
+  {
+    // any → new_talker transition: stamp the talker-start time. Retained
+    // across the subsequent clear so EarliestMonitorTalkerFilter can
+    // identify the freshly-stopped TG at flush fanout time.
+    gettimeofday(&tg_info->talker_start_timestamp, NULL);
+  }
+  talkerUpdated(tg, old_talker, new_talker);
+
+  if ((tg_info->auto_qsy_after_s > 0) && autoQsyEnabledForTG(tg_info->id))
+  {
+    time_t now = time(NULL);
+    if ((new_talker == 0) && (now > tg_info->auto_qsy_time))
+    {
+      requestAutoQsy(tg_info->id);
+      tg_info->auto_qsy_time = now + tg_info->auto_qsy_after_s;
+    }
+    else if (tg_info->auto_qsy_time <= 0)
+    {
+      tg_info->auto_qsy_time = now + tg_info->auto_qsy_after_s;
+    }
+  }
+  //printTGStatus();
+} /* TGHandler::setTalkerForTG */
+
+
+ReflectorClient* TGHandler::talkerForTG(uint32_t tg) const
+{
+  IdMap::const_iterator id_map_it = m_id_map.find(tg);
+  if (id_map_it == m_id_map.end())
+  {
+    return 0;
+  }
+  return id_map_it->second->talker;
+} /* TGHandler::talkerForTG */
+
+
+bool TGHandler::talkerStartTimeForTG(uint32_t tg, struct timeval& out) const
+{
+  IdMap::const_iterator id_map_it = m_id_map.find(tg);
+  if (id_map_it == m_id_map.end())
+  {
+    return false;
+  }
+  if (!timerisset(&id_map_it->second->talker_start_timestamp))
+  {
+    return false;
+  }
+  out = id_map_it->second->talker_start_timestamp;
+  return true;
+} /* TGHandler::talkerStartTimeForTG */
+
+
+uint32_t TGHandler::TGForClient(ReflectorClient* client)
+{
+  ClientMap::iterator client_map_it = m_client_map.find(client);
+  if (client_map_it == m_client_map.end())
+  {
+    return 0;
+  }
+  return client_map_it->second->id;
+} /* TGHandler::TGForClient */
+
+
+void TGHandler::setTrunkTalkerForTG(uint32_t tg, const std::string& callsign)
+{
+  std::string old = trunkTalkerForTG(tg);
+  if (callsign == old)
+  {
+    return;
+  }
+  // Capture peer_id before any erase so stop events can carry it.
+  std::string peer_id;
+  auto pid_it = m_trunk_talker_peer_ids.find(tg);
+  if (pid_it != m_trunk_talker_peer_ids.end())
+  {
+    peer_id = pid_it->second;
+  }
+  if (callsign.empty())
+  {
+    m_trunk_talkers.erase(tg);
+    // Retain m_trunk_talker_start_times[tg] so flush fanout filters can
+    // identify this freshly-stopped TG.
+  }
+  else
+  {
+    if (m_trunk_talkers.find(tg) == m_trunk_talkers.end() &&
+        m_trunk_talkers.size() >= MAX_TRUNK_TALKERS)
+    {
+      geulog::warn("trunk", "Maximum trunk talker limit (",
+                   static_cast<size_t>(MAX_TRUNK_TALKERS),
+                   ") reached, ignoring TG #", tg);
+      return;
+    }
+    m_trunk_talkers[tg] = callsign;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    m_trunk_talker_start_times[tg] = now;
+  }
+  trunkTalkerUpdated(tg, old, callsign, peer_id);
+} /* TGHandler::setTrunkTalkerForTG */
+
+
+void TGHandler::clearTrunkTalkerForTG(uint32_t tg)
+{
+  // Call setTrunkTalkerForTG first so it can capture peer_id from
+  // m_trunk_talker_peer_ids before we erase it (the signal handler
+  // needs it to publish peer-namespaced MQTT topics).
+  setTrunkTalkerForTG(tg, "");
+  m_trunk_talker_peer_ids.erase(tg);
+} /* TGHandler::clearTrunkTalkerForTG */
+
+
+void TGHandler::clearAllTrunkTalkers(void)
+{
+  // Collect keys first, then clear via clearTrunkTalkerForTG so the signal
+  // fires with the peer_id still present in m_trunk_talker_peer_ids.
+  std::vector<uint32_t> keys;
+  for (auto& kv : m_trunk_talkers)
+  {
+    keys.push_back(kv.first);
+  }
+  for (uint32_t tg : keys)
+  {
+    clearTrunkTalkerForTG(tg);
+  }
+} /* TGHandler::clearAllTrunkTalkers */
+
+
+void TGHandler::setTrunkTalkerForTGViaPeer(uint32_t tg,
+                                           const std::string& callsign,
+                                           const std::string& peer_id)
+{
+  if (!callsign.empty())
+  {
+    // Store peer_id BEFORE firing the signal so the signal handler can read it.
+    m_trunk_talker_peer_ids[tg] = peer_id;
+  }
+  setTrunkTalkerForTG(tg, callsign);
+  if (callsign.empty())
+  {
+    // Erase AFTER the signal has fired (setTrunkTalkerForTG captures it first).
+    m_trunk_talker_peer_ids.erase(tg);
+  }
+} /* TGHandler::setTrunkTalkerForTGViaPeer */
+
+
+void TGHandler::clearTrunkTalkersForPeer(const std::string& peer_id)
+{
+  // Collect matching TGs first so we can fire the signal while peer_id is
+  // still in m_trunk_talker_peer_ids (clearTrunkTalkerForTG erases afterwards).
+  std::vector<uint32_t> tgs_to_clear;
+  for (auto& kv : m_trunk_talker_peer_ids)
+  {
+    if (kv.second == peer_id)
+    {
+      tgs_to_clear.push_back(kv.first);
+    }
+  }
+  for (uint32_t tg : tgs_to_clear)
+  {
+    clearTrunkTalkerForTG(tg);
+  }
+} /* TGHandler::clearTrunkTalkersForPeer */
+
+
+std::string TGHandler::peerIdForTG(uint32_t tg) const
+{
+  auto it = m_trunk_talker_peer_ids.find(tg);
+  return (it != m_trunk_talker_peer_ids.end()) ? it->second : std::string();
+} /* TGHandler::peerIdForTG */
+
+
+std::string TGHandler::trunkTalkerForTG(uint32_t tg) const
+{
+  auto it = m_trunk_talkers.find(tg);
+  return (it != m_trunk_talkers.end()) ? it->second : "";
+} /* TGHandler::trunkTalkerForTG */
+
+
+bool TGHandler::hasTrunkTalker(uint32_t tg) const
+{
+  return m_trunk_talkers.count(tg) > 0;
+} /* TGHandler::hasTrunkTalker */
+
+
+bool TGHandler::trunkTalkerStartTimeForTG(uint32_t tg,
+                                          struct timeval& out) const
+{
+  auto it = m_trunk_talker_start_times.find(tg);
+  if (it == m_trunk_talker_start_times.end())
+  {
+    return false;
+  }
+  out = it->second;
+  return true;
+} /* TGHandler::trunkTalkerStartTimeForTG */
+
+
+bool TGHandler::allowTgSelection(ReflectorClient *client, uint32_t tg)
+{
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  try
+  {
+    std::string allow;
+    if (m_cfg->getValue(ss.str(), "ALLOW", allow))
+    {
+      if (!std::regex_match(client->callsign(), std::regex(allow)))
+      {
+        return false;
+      }
+      //std::cout << "### " << client->callsign() << " Match!" << std::endl;
+    }
+    return true;
+  }
+  catch (std::regex_error& e)
+  {
+    geulog::warn("core", "Regular expression parsing error in ",
+                 ss.str(), "/ALLOW: ", e.what());
+  }
+  return false;
+} /* TGHandler::allowTgSelection */
+
+
+bool TGHandler::allowTgMonitoring(ReflectorClient *client, uint32_t tg)
+{
+  if (!allowTgSelection(client, tg))
+  {
+    return false;
+  }
+
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  try
+  {
+    std::string allow;
+    if (m_cfg->getValue(ss.str(), "ALLOW_MONITOR", allow))
+    {
+      if (!std::regex_match(client->callsign(), std::regex(allow)))
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+  catch (std::regex_error& e)
+  {
+    geulog::warn("core", "Regular expression parsing error in ",
+                 ss.str(), "/ALLOW_MONITOR: ", e.what());
+  }
+  return false;
+} /* TGHandler::allowTgMonitoring */
+
+
+bool TGHandler::showActivity(uint32_t tg) const
+{
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool show_activity = true;
+  m_cfg->getValue(ss.str(), "SHOW_ACTIVITY", show_activity);
+  return show_activity;
+} /* TGHandler::showActivity */
+
+
+bool TGHandler::isRestricted(uint32_t tg) const
+{
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  std::string allow;
+  return m_cfg->getValue(ss.str(), "ALLOW", allow);
+} /* TGHandler::isRestricted */
+
+
+namespace {
+  // Lower-case a copy of a DUPLEX_MODE value for case-insensitive compare.
+  std::string fdx_lc(std::string s)
+  {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return s;
+  }
+
+  // Parse a mixed TG list: single values and a-b ranges, comma separated,
+  // e.g. "91,240,300-310,500". Whitespace ignored. Returns true if `tg` is
+  // covered. Malformed tokens are skipped (safe, never throws).
+  bool fdx_tg_in_list(const std::string& list, uint32_t tg)
+  {
+    std::string tok;
+    std::istringstream ss(list);
+    while (std::getline(ss, tok, ','))
+    {
+      // strip whitespace
+      tok.erase(std::remove_if(tok.begin(), tok.end(),
+            [](unsigned char c){ return std::isspace(c); }), tok.end());
+      if (tok.empty()) { continue; }
+      std::size_t dash = tok.find('-');
+      try
+      {
+        if (dash == std::string::npos)
+        {
+          if (static_cast<uint32_t>(std::stoul(tok)) == tg) { return true; }
+        }
+        else
+        {
+          uint32_t lo = static_cast<uint32_t>(std::stoul(tok.substr(0, dash)));
+          uint32_t hi = static_cast<uint32_t>(std::stoul(tok.substr(dash + 1)));
+          if (lo > hi) { std::swap(lo, hi); }
+          if (tg >= lo && tg <= hi) { return true; }
+        }
+      }
+      catch (...) { /* skip malformed token */ }
+    }
+    return false;
+  }
+
+  // Expand a mixed TG list ("91,240,300-310") into explicit, sorted, de-duped
+  // TGs. Ranges are capped so a huge span cannot explode memory. Used for the
+  // QSY target pool (QSY_TGS). Malformed tokens are skipped (never throws).
+  std::vector<uint32_t> fdx_expand_list(const std::string& list)
+  {
+    static const size_t MAX_EXPAND = 20000;
+    std::set<uint32_t> out;
+    std::string tok;
+    std::istringstream ss(list);
+    while (std::getline(ss, tok, ','))
+    {
+      tok.erase(std::remove_if(tok.begin(), tok.end(),
+            [](unsigned char c){ return std::isspace(c); }), tok.end());
+      if (tok.empty()) { continue; }
+      std::size_t dash = tok.find('-');
+      try
+      {
+        if (dash == std::string::npos)
+        {
+          out.insert(static_cast<uint32_t>(std::stoul(tok)));
+        }
+        else
+        {
+          uint32_t lo = static_cast<uint32_t>(std::stoul(tok.substr(0, dash)));
+          uint32_t hi = static_cast<uint32_t>(std::stoul(tok.substr(dash + 1)));
+          if (lo > hi) { std::swap(lo, hi); }
+          for (uint32_t t = lo; (t <= hi) && (out.size() < MAX_EXPAND); ++t)
+          {
+            out.insert(t);
+          }
+        }
+      }
+      catch (...) { /* skip malformed token */ }
+      if (out.size() >= MAX_EXPAND) { break; }
+    }
+    return std::vector<uint32_t>(out.begin(), out.end());
+  }
+} /* anonymous namespace */
+
+
+bool TGHandler::fullDuplexForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return false; }
+
+  // 1) Explicit per-TG DUPLEX_MODE always wins (can force half even if the
+  //    TG is also listed in FULL_DUPLEX_TGS).
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  std::string mode;
+  if (m_cfg->getValue(ss.str(), "DUPLEX_MODE", mode) && !mode.empty())
+  {
+    return fdx_lc(mode) == "full";
+  }
+
+  // 2) GLOBAL FULL_DUPLEX_TGS list/range membership -> full.
+  std::string list;
+  if (m_cfg->getValue("GLOBAL", "FULL_DUPLEX_TGS", list) && !list.empty())
+  {
+    if (fdx_tg_in_list(list, tg)) { return true; }
+  }
+
+  // 3) GLOBAL DUPLEX_MODE default.
+  std::string gmode;
+  if (m_cfg->getValue("GLOBAL", "DUPLEX_MODE", gmode) && !gmode.empty())
+  {
+    return fdx_lc(gmode) == "full";
+  }
+
+  // 4) Default: half-duplex (legacy single-talker, unchanged).
+  return false;
+} /* TGHandler::fullDuplexForTG */
+
+
+void TGHandler::duplexInfo(bool& default_full, std::vector<uint32_t>& full_lo,
+                           std::vector<uint32_t>& full_hi,
+                           std::vector<uint32_t>& force_full,
+                           std::vector<uint32_t>& force_half) const
+{
+  default_full = false;
+  full_lo.clear(); full_hi.clear(); force_full.clear(); force_half.clear();
+  if (m_cfg == nullptr) { return; }
+
+  std::string gmode;
+  if (m_cfg->getValue("GLOBAL", "DUPLEX_MODE", gmode) && !gmode.empty())
+  {
+    default_full = (fdx_lc(gmode) == "full");
+  }
+
+  std::string list;
+  if (m_cfg->getValue("GLOBAL", "FULL_DUPLEX_TGS", list) && !list.empty())
+  {
+    std::stringstream ss(list);
+    std::string tok;
+    while (std::getline(ss, tok, ',') && (full_lo.size() < 1000))
+    {
+      tok.erase(std::remove_if(tok.begin(), tok.end(),
+            [](unsigned char c){ return std::isspace(c); }), tok.end());
+      if (tok.empty()) { continue; }
+      try
+      {
+        std::size_t dash = tok.find('-');
+        uint32_t lo = static_cast<uint32_t>(std::stoul(tok.substr(0, dash)));
+        uint32_t hi = (dash == std::string::npos) ? lo
+            : static_cast<uint32_t>(std::stoul(tok.substr(dash + 1)));
+        if (lo > hi) { std::swap(lo, hi); }
+        full_lo.push_back(lo);
+        full_hi.push_back(hi);
+      }
+      catch (...) { /* skip malformed token */ }
+    }
+  }
+
+  // [TG#n] DUPLEX_MODE overrides. listSections() is not const in Async::Config.
+  Async::Config* cfg = const_cast<Async::Config*>(m_cfg);
+  for (const std::string& sec : cfg->listSections())
+  {
+    if (sec.rfind("TG#", 0) != 0) { continue; }
+    std::string mode;
+    if (!m_cfg->getValue(sec, "DUPLEX_MODE", mode) || mode.empty()) { continue; }
+    try
+    {
+      uint32_t tg = static_cast<uint32_t>(std::stoul(sec.substr(3)));
+      ((fdx_lc(mode) == "full") ? force_full : force_half).push_back(tg);
+    }
+    catch (...) { /* not a numeric TG section */ }
+    if (force_full.size() + force_half.size() >= 1000) { break; }
+  }
+} /* TGHandler::duplexInfo */
+
+
+bool TGHandler::qsyBoolForTG(uint32_t tg, const char* key, bool def) const
+{
+  if (m_cfg == nullptr) { return def; }
+    // Per-TG value overrides the GLOBAL default; neither set -> def.
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool v = def;
+  if (m_cfg->getValue(ss.str(), key, v)) { return v; }
+  if (m_cfg->getValue("GLOBAL", key, v)) { return v; }
+  return def;
+} /* TGHandler::qsyBoolForTG */
+
+
+time_t TGHandler::autoQsyAfterForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return 0; }
+    // Per-TG value overrides the GLOBAL default; neither set -> 0 (disabled).
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  time_t after = 0;
+  if (m_cfg->getValue(ss.str(), "AUTO_QSY_AFTER", after)) { return after; }
+  after = 0;
+  m_cfg->getValue("GLOBAL", "AUTO_QSY_AFTER", after);
+  return after;
+} /* TGHandler::autoQsyAfterForTG */
+
+
+bool TGHandler::autoQsyEnabledForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return false; }
+    // Explicit AUTO_QSY (per-TG then GLOBAL) wins. When neither is set, keep
+    // the legacy behaviour: auto QSY is active whenever an AUTO_QSY_AFTER
+    // time is configured. This preserves existing setups byte-for-byte.
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool v = true;
+  if (m_cfg->getValue(ss.str(), "AUTO_QSY", v)) { return v; }
+  if (m_cfg->getValue("GLOBAL", "AUTO_QSY", v)) { return v; }
+  return autoQsyAfterForTG(tg) > 0;
+} /* TGHandler::autoQsyEnabledForTG */
+
+
+bool TGHandler::qsyEnableForTG(uint32_t tg) const
+{
+  return qsyBoolForTG(tg, "QSY_ENABLE", true);
+} /* TGHandler::qsyEnableForTG */
+
+
+bool TGHandler::qsyFollowForTG(uint32_t tg) const
+{
+  return qsyBoolForTG(tg, "QSY_FOLLOW", true);
+} /* TGHandler::qsyFollowForTG */
+
+
+std::vector<uint32_t> TGHandler::qsyTgsForTG(uint32_t tg) const
+{
+  if (m_cfg == nullptr) { return {}; }
+    // Per-TG QSY_TGS overrides GLOBAL; neither set -> empty (caller uses
+    // the legacy RANDOM_QSY_RANGE).
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  std::string list;
+  if (m_cfg->getValue(ss.str(), "QSY_TGS", list) && !list.empty())
+  {
+    return fdx_expand_list(list);
+  }
+  if (m_cfg->getValue("GLOBAL", "QSY_TGS", list) && !list.empty())
+  {
+    return fdx_expand_list(list);
+  }
+  return {};
+} /* TGHandler::qsyTgsForTG */
+
+
+/****************************************************************************
+ *
+ * Protected member functions
+ *
+ ****************************************************************************/
+
+
+
+/****************************************************************************
+ *
+ * Private member functions
+ *
+ ****************************************************************************/
+
+void TGHandler::checkTimers(Async::Timer *t)
+{
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  for (IdMap::iterator it = m_id_map.begin(); it != m_id_map.end(); ++it)
+  {
+    TGInfo *tg_info = it->second;
+    assert(tg_info != 0);
+    if (tg_info->talker != 0)
+    {
+      struct timeval diff;
+      timersub(&now, &tg_info->last_talker_timestamp, &diff);
+      if (diff.tv_sec > TALKER_AUDIO_TIMEOUT)
+      {
+        geulog::info("core", tg_info->talker->callsign(),
+                     ": Talker audio timeout on TG #", tg_info->id);
+        setTalkerForTG(tg_info->id, 0);
+      }
+
+      if ((tg_info->sql_timeout_cnt > 0) && (--tg_info->sql_timeout_cnt == 0))
+      {
+        geulog::info("core", tg_info->talker->callsign(),
+                     ": Talker audio timeout on TG #", tg_info->id);
+        tg_info->talker->setBlock(m_sql_timeout_blocktime);
+        setTalkerForTG(tg_info->id, 0);
+      }
+    }
+  }
+} /* TGHandler::checkTimers */
+
+
+void TGHandler::removeClientP(TGInfo *tg_info, ReflectorClient* client)
+{
+  assert(tg_info != 0);
+  assert(client != 0);
+  if (client == tg_info->talker)
+  {
+    tg_info->talker = 0;
+  }
+  tg_info->clients.erase(client);
+  m_client_map.erase(client);
+  if (tg_info->clients.empty())
+  {
+    m_id_map.erase(tg_info->id);
+    delete tg_info;
+  }
+} /* TGHandler::removeClientP */
+
+
+void TGHandler::printTGStatus(void)
+{
+  geulog::debug("core", "----------- BEGIN ----------------");
+  for (IdMap::const_iterator it = m_id_map.begin();
+       it != m_id_map.end(); ++it)
+  {
+    TGInfo *tg_info = it->second;
+    std::ostringstream line;
+    line << tg_info->id << ": ";
+    for (ClientSet::const_iterator it = tg_info->clients.begin();
+         it != tg_info->clients.end(); ++it)
+    {
+      ReflectorClient* client = *it;
+      if (client == tg_info->talker)
+      {
+        line << "*";
+      }
+      line << client->callsign() << " ";
+    }
+    geulog::debug("core", line.str());
+  }
+  geulog::debug("core", "------------ END -----------------");
+} /* TGHandler::printTGStatus */
+
+
+/*
+ * This file has not been truncated
+ */

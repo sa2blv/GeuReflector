@@ -1,0 +1,854 @@
+#include <cmath>
+#include <iostream>
+#include <sstream>
+
+#include <Log.h>
+
+#include "SatelliteLink.h"
+#include "ReflectorMsg.h"
+#include "Reflector.h"
+#include "TGHandler.h"
+#include "ReflectorClient.h"
+
+using namespace std;
+using namespace Async;
+
+namespace {
+
+// Byte-bound and strip control chars / ':' from an identifier coming over
+// the wire. Mirrors the sanitizer used in TrunkLink/TwinLink — wire data
+// flows into Redis key names, MQTT payloads and log output.
+std::string sanitizeIdent(const std::string& in, size_t max_len)
+{
+  std::string out;
+  out.reserve(std::min(in.size(), max_len));
+  for (char c : in)
+  {
+    unsigned char u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u == 0x7f) continue;
+    if (c == ':') continue;
+    out += c;
+    if (out.size() >= max_len) break;
+  }
+  return out;
+}
+
+std::string sanitizeText(const std::string& in, size_t max_bytes)
+{
+  std::string out;
+  out.reserve(std::min(in.size(), max_bytes));
+  for (char c : in)
+  {
+    unsigned char u = static_cast<unsigned char>(c);
+    if (u < 0x20 || u == 0x7f) continue;
+    out += c;
+    if (out.size() >= max_bytes) break;
+  }
+  return out;
+}
+
+void sanitizeJsonStrings(Json::Value& v, unsigned depth = 0)
+{
+  static constexpr unsigned MAX_DEPTH       = 8;
+  static constexpr Json::ArrayIndex MAX_LEN = 256;
+  static constexpr size_t MAX_STR_BYTES     = 1024;
+  if (depth >= MAX_DEPTH) { v = Json::Value(); return; }
+  if (v.isString())
+  {
+    v = sanitizeText(v.asString(), MAX_STR_BYTES);
+  }
+  else if (v.isArray())
+  {
+    if (v.size() > MAX_LEN) v.resize(MAX_LEN);
+    for (Json::ArrayIndex i = 0; i < v.size(); ++i)
+    {
+      sanitizeJsonStrings(v[i], depth + 1);
+    }
+  }
+  else if (v.isObject())
+  {
+    auto names = v.getMemberNames();
+    if (names.size() > MAX_LEN)
+    {
+      for (size_t i = MAX_LEN; i < names.size(); ++i)
+      {
+        v.removeMember(names[i]);
+      }
+      names.resize(MAX_LEN);
+    }
+    for (const auto& k : names)
+    {
+      sanitizeJsonStrings(v[k], depth + 1);
+    }
+  }
+}
+
+}  // namespace
+
+
+SatelliteLink::SatelliteLink(Reflector* reflector,
+                             Async::FramedTcpConnection* con)
+  : m_reflector(reflector), m_con(con),
+    m_hello_received(false),
+    // Heartbeat starts disabled; handleMsgPeerHello turns it on after
+    // successful authentication (mirrors TrunkLink). If a hello is
+    // rejected the timer never ticks, so it cannot try to write to a
+    // socket that m_con->disconnect() has already closed.
+    m_heartbeat_timer(1000, Timer::TYPE_PERIODIC, false),
+    m_hb_tx_cnt(HEARTBEAT_TX_CNT_RESET),
+    m_hb_rx_cnt(HEARTBEAT_RX_CNT_RESET)
+{
+  m_con->setMaxFrameSize(ReflectorMsg::MAX_POSTAUTH_FRAME_SIZE);
+  m_con->frameReceived.connect(
+      sigc::mem_fun(*this, &SatelliteLink::onFrameReceived));
+
+  m_heartbeat_timer.expired.connect(
+      sigc::mem_fun(*this, &SatelliteLink::heartbeatTick));
+} /* SatelliteLink::SatelliteLink */
+
+
+SatelliteLink::~SatelliteLink(void)
+{
+  m_heartbeat_timer.setEnable(false);
+  for (uint32_t tg : m_sat_active_tgs)
+  {
+    TGHandler::instance()->clearTrunkTalkerForTG(tg);
+  }
+  m_sat_active_tgs.clear();
+  // Drop any partner roster we held for this satellite so Reflector's
+  // tombstone bookkeeping (Redis live:peer_node:<sat>:<callsign>) gets
+  // a chance to clear those keys before we go away.
+  if (!m_partner_nodes.empty() && !m_satellite_id.empty())
+  {
+    m_reflector->onPeerNodeList(m_satellite_id,
+        std::vector<MsgPeerNodeList::NodeEntry>{});
+    m_partner_nodes.clear();
+  }
+} /* SatelliteLink::~SatelliteLink */
+
+
+Json::Value SatelliteLink::statusJson(void) const
+{
+  Json::Value obj(Json::objectValue);
+  obj["id"] = m_satellite_id;
+  obj["authenticated"] = m_hello_received;
+
+  Json::Value active_tgs(Json::arrayValue);
+  for (uint32_t tg : m_sat_active_tgs)
+  {
+    active_tgs.append(tg);
+  }
+  obj["active_tgs"] = active_tgs;
+
+  if (!m_tg_filter.empty())
+  {
+    obj["filter"] = m_tg_filter.toString();
+  }
+
+  Json::Value nodes_arr(Json::arrayValue);
+  for (const auto& n : m_partner_nodes)
+  {
+    Json::Value entry = n.status.isObject() ? n.status
+                                            : Json::Value(Json::objectValue);
+    entry["callsign"] = n.callsign;
+    entry["tg"]       = static_cast<Json::UInt>(n.tg);
+    if (n.lat != 0.0f || n.lon != 0.0f)
+    {
+      entry["lat"] = n.lat;
+      entry["lon"] = n.lon;
+    }
+    if (!n.qth_name.empty()) entry["qth_name"] = n.qth_name;
+    if (!n.sat_id.empty())   entry["sat_id"]   = n.sat_id;
+    entry["isTalker"] =
+        (TGHandler::instance()->trunkTalkerForTG(n.tg) == n.callsign);
+    nodes_arr.append(entry);
+  }
+  obj["nodes"] = nodes_arr;
+
+  return obj;
+} /* SatelliteLink::statusJson */
+
+
+void SatelliteLink::onParentTalkerStart(uint32_t tg,
+                                         const std::string& callsign)
+{
+  if (!m_hello_received) return;
+  if (!filterPassesTg(tg)) return;
+  sendMsg(MsgPeerTalkerStart(tg, callsign));
+} /* SatelliteLink::onParentTalkerStart */
+
+
+void SatelliteLink::onParentTalkerStop(uint32_t tg)
+{
+  if (!m_hello_received) return;
+  if (!filterPassesTg(tg)) return;
+  sendMsg(MsgPeerTalkerStop(tg));
+} /* SatelliteLink::onParentTalkerStop */
+
+
+void SatelliteLink::onParentAudio(uint32_t tg,
+                                   const std::vector<uint8_t>& audio)
+{
+  if (!m_hello_received) return;
+  if (!filterPassesTg(tg)) return;
+  sendMsg(MsgPeerAudio(tg, audio));
+} /* SatelliteLink::onParentAudio */
+
+
+void SatelliteLink::onParentFlush(uint32_t tg)
+{
+  if (!m_hello_received) return;
+  if (!filterPassesTg(tg)) return;
+  sendMsg(MsgPeerFlush(tg));
+} /* SatelliteLink::onParentFlush */
+
+
+void SatelliteLink::onFrameReceived(FramedTcpConnection* con,
+                                     std::vector<uint8_t>& data)
+{
+  auto buf = reinterpret_cast<const char*>(data.data());
+  stringstream ss;
+  ss.write(buf, data.size());
+
+  ReflectorMsg header;
+  if (!header.unpack(ss))
+  {
+    geulog::error("satellite", "Failed to unpack satellite message header");
+    return;
+  }
+
+  if (!m_hello_received &&
+      header.type() != MsgPeerHello::TYPE &&
+      header.type() != MsgPeerHeartbeat::TYPE)
+  {
+    geulog::warn("satellite", "Ignoring message type=", header.type(),
+                 " before hello");
+    return;
+  }
+
+  m_hb_rx_cnt = HEARTBEAT_RX_CNT_RESET;
+
+  switch (header.type())
+  {
+    case MsgPeerHeartbeat::TYPE:
+      handleMsgPeerHeartbeat();
+      break;
+    case MsgPeerHello::TYPE:
+      handleMsgPeerHello(ss);
+      break;
+    case MsgPeerTalkerStart::TYPE:
+      handleMsgPeerTalkerStart(ss);
+      break;
+    case MsgPeerTalkerStop::TYPE:
+      handleMsgPeerTalkerStop(ss);
+      break;
+    case MsgPeerAudio::TYPE:
+      handleMsgPeerAudio(ss);
+      break;
+    case MsgPeerFlush::TYPE:
+      handleMsgPeerFlush(ss);
+      break;
+    case MsgPeerFilter::TYPE:
+      handleMsgPeerFilter(ss);
+      break;
+    case MsgPeerTgInterest::TYPE:
+      handleMsgPeerTgInterest(ss);
+      break;
+    case MsgPeerNodeList::TYPE:
+      handleMsgPeerNodeList(ss);
+      break;
+    case MsgPeerClientConnected::TYPE:
+      handleMsgPeerClientConnected(ss);
+      break;
+    case MsgPeerClientDisconnected::TYPE:
+      handleMsgPeerClientDisconnected(ss);
+      break;
+    case MsgPeerClientRx::TYPE:
+      handleMsgPeerClientRx(ss);
+      break;
+    case MsgPeerClientStatus::TYPE:
+      handleMsgPeerClientStatus(ss);
+      break;
+    default:
+      geulog::warn("satellite", "Unknown message type=", header.type());
+      break;
+  }
+} /* SatelliteLink::onFrameReceived */
+
+
+void SatelliteLink::handleMsgPeerHeartbeat(void)
+{
+} /* SatelliteLink::handleMsgPeerHeartbeat */
+
+
+void SatelliteLink::handleMsgPeerHello(std::istream& is)
+{
+  MsgPeerHello msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite", "Failed to unpack MsgPeerHello");
+    return;
+  }
+
+  if (msg.id().empty())
+  {
+    geulog::error("satellite", "Satellite sent empty ID");
+    m_con->disconnect();
+    linkFailed(this);
+    return;
+  }
+
+  if (msg.role() != MsgPeerHello::ROLE_SATELLITE)
+  {
+    geulog::error("satellite", "Expected ROLE_SATELLITE from '", msg.id(),
+                  "' but got role=", (int)msg.role());
+    m_con->disconnect();
+    linkFailed(this);
+    return;
+  }
+
+  std::string secret;
+  bool pinned = false;
+  if (!m_reflector->resolveSatelliteSecret(msg.id(), secret, pinned))
+  {
+    geulog::error("satellite",
+                  "No secret configured to authenticate satellite '",
+                  msg.id(), "' (no SECRET_<id>= match and no fallback "
+                  "SECRET=) — rejecting");
+    m_con->disconnect();
+    linkFailed(this);
+    return;
+  }
+
+  if (!msg.verify(secret))
+  {
+    geulog::error("satellite",
+                  "Authentication failed for satellite '", msg.id(),
+                  "' (pinned=", (pinned ? "true" : "false"), ")");
+    m_con->disconnect();
+    linkFailed(this);
+    return;
+  }
+
+  m_resolved_secret = secret;
+  m_satellite_id    = msg.id();
+  m_hello_received  = true;
+  // Now that we're authenticated, start ticking the heartbeat. The
+  // timer is constructed disabled (see ctor) so that a rejected hello
+  // cannot leave it ticking against a socket m_con->disconnect() has
+  // already closed.
+  m_heartbeat_timer.setEnable(true);
+
+  geulog::info("satellite", "Satellite '", m_satellite_id,
+               "' authenticated (pinned=", (pinned ? "true" : "false"), ")");
+
+  // Send hello reply so the satellite client can set m_hello_received
+  // and start forwarding local events. This also generates early
+  // parent→satellite traffic, keeping the connection alive through
+  // firewalls / NAT devices that drop idle TCP sessions.
+  sendMsg(MsgPeerHello("PARENT", "", 0, m_resolved_secret,
+                       MsgPeerHello::ROLE_PEER));
+
+  // Tell the satellite which TGs are full duplex (mixed) here.
+  m_duplex_sig.clear();
+  sendDuplexInfo();
+
+  // Bring the new satellite up to speed: schedule a debounced node-list
+  // emission so it receives the parent's combined view (parent-local
+  // + every sibling satellite, minus its own contribution).
+  m_reflector->scheduleNodeListUpdate();
+
+  statusChanged(this);
+} /* SatelliteLink::handleMsgPeerHello */
+
+
+void SatelliteLink::handleMsgPeerTalkerStart(std::istream& is)
+{
+  MsgPeerTalkerStart msg;
+  if (!msg.unpack(is)) return;
+
+  uint32_t tg = msg.tg();
+
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Full duplex: the satellite is a LOCAL source in the TG mixer. Talker
+    // start/stop toward clients and ONE collapsed mesh talker come from the
+    // mixer's source activity (Reflector::onSourceActivity), so nothing is
+    // registered or forwarded here; just remember the callsign for the mix.
+    m_sat_active_tgs.insert(tg);
+    m_sat_talker_cs[tg] = msg.callsign();
+    statusChanged(this);
+    return;
+  }
+
+  // Register as trunk talker — fires trunkTalkerUpdated which notifies
+  // local clients. Reflector::onTrunkTalkerUpdated also forwards to
+  // other satellites and trunk peers.
+  m_sat_active_tgs.insert(tg);
+  TGHandler::instance()->setTrunkTalkerForTGViaPeer(tg, msg.callsign(),
+                                                    m_satellite_id);
+
+  // Forward to trunk peers
+  m_reflector->forwardSatelliteAudioToTrunks(tg, msg.callsign());
+
+  // Forward to the twin partner (the satellite is downstream-local to us)
+  m_reflector->forwardSatelliteAudioToTwin(tg, msg.callsign());
+
+  statusChanged(this);
+} /* SatelliteLink::handleMsgPeerTalkerStart */
+
+
+void SatelliteLink::handleMsgPeerTalkerStop(std::istream& is)
+{
+  MsgPeerTalkerStop msg;
+  if (!msg.unpack(is)) return;
+
+  uint32_t tg = msg.tg();
+  m_sat_active_tgs.erase(tg);
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Full duplex: the mixer's hangover ends the source's activity.
+    m_sat_talker_cs.erase(tg);
+    statusChanged(this);
+    return;
+  }
+  TGHandler::instance()->clearTrunkTalkerForTG(tg);
+
+  // Forward stop to trunk peers
+  m_reflector->forwardSatelliteStopToTrunks(tg);
+
+  // Forward stop to the twin partner
+  m_reflector->forwardSatelliteStopToTwin(tg);
+
+  statusChanged(this);
+} /* SatelliteLink::handleMsgPeerTalkerStop */
+
+
+void SatelliteLink::handleMsgPeerAudio(std::istream& is)
+{
+  MsgPeerAudio msg;
+  if (!msg.unpack(is)) return;
+
+  uint32_t tg = msg.tg();
+  if (msg.audio().empty()) return;
+  if (m_sat_active_tgs.find(tg) == m_sat_active_tgs.end()) return;
+
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Full duplex: blend into the TG mixer as a LOCAL source ("s:<id>"), so
+    // it mixes with the reflector's own talkers, reaches clients as a single
+    // stream, goes out to the mesh inside local_mix and comes back to this
+    // satellite as mix-minus-self (Reflector::onMixReady).
+    m_reflector->feedSatelliteAudioToMixer(tg, mixerId(), msg.audio(),
+                                           m_sat_talker_cs[tg]);
+    return;
+  }
+
+  // Broadcast to local clients on the parent — both selected and monitoring.
+  MsgUdpAudio udp_msg(msg.audio());
+  m_reflector->broadcastUdpMsg(udp_msg,
+      ReflectorClient::mkOrFilter(
+        ReflectorClient::TgFilter(tg),
+        ReflectorClient::mkAndFilter(
+          ReflectorClient::TgMonitorFilter(tg),
+          ReflectorClient::mkAndFilter(
+            ReflectorClient::PassiveObserverFilter(),
+            ReflectorClient::EarliestMonitorTalkerFilter(tg)))));
+
+  // Resend to BLV sub trunk
+  m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, msg.tg(), "");
+
+  // Forward to trunk peers
+  m_reflector->forwardSatelliteRawAudioToTrunks(tg, msg.audio());
+
+  // Forward to the twin partner
+  m_reflector->forwardSatelliteRawAudioToTwin(tg, msg.audio());
+
+  // Forward to other satellites (not this one)
+  m_reflector->forwardAudioToSatellitesExcept(this, tg, msg.audio());
+} /* SatelliteLink::handleMsgPeerAudio */
+
+
+void SatelliteLink::handleMsgPeerFlush(std::istream& is)
+{
+  MsgPeerFlush msg;
+  if (!msg.unpack(is)) return;
+
+  uint32_t tg = msg.tg();
+  if (TGHandler::instance()->fullDuplexForTG(tg)) return;  // the mixer owns the TG
+
+  m_reflector->broadcastUdpMsg(MsgUdpFlushSamples(),
+      ReflectorClient::mkOrFilter(
+        ReflectorClient::TgFilter(tg),
+        ReflectorClient::mkAndFilter(
+          ReflectorClient::TgMonitorFilter(tg),
+          ReflectorClient::mkAndFilter(
+            ReflectorClient::PassiveObserverFilter(),
+            ReflectorClient::EarliestMonitorTalkerFilter(tg)))));
+
+  m_reflector->forwardSatelliteFlushToTrunks(tg);
+  m_reflector->forwardSatelliteFlushToTwin(tg);
+  m_reflector->forwardFlushToSatellitesExcept(this, tg);
+} /* SatelliteLink::handleMsgPeerFlush */
+
+
+void SatelliteLink::sendMsg(const ReflectorMsg& msg)
+{
+  // Defense in depth: never write to a closed socket — AsyncTcpConnection::
+  // write() asserts sock >= 0. Mirrors the guard on the satellite (client)
+  // side (SatelliteClient gates every sender on isConnected()).
+  if (m_con == nullptr || !m_con->isConnected()) return;
+  ostringstream ss;
+  ReflectorMsg header(msg.type());
+  if (!header.pack(ss) || !msg.pack(ss))
+  {
+    geulog::error("satellite", "Failed to pack message type=", msg.type());
+    return;
+  }
+  m_hb_tx_cnt = HEARTBEAT_TX_CNT_RESET;
+  m_con->write(ss.str().data(), ss.str().size());
+} /* SatelliteLink::sendMsg */
+
+
+void SatelliteLink::sendDuplexInfo(void)
+{
+  if (!m_hello_received) return;
+  bool def_full = false;
+  std::vector<uint32_t> lo, hi, ffull, fhalf;
+  TGHandler::instance()->duplexInfo(def_full, lo, hi, ffull, fhalf);
+  std::ostringstream sig;
+  sig << def_full << '|';
+  for (size_t i = 0; i < lo.size(); ++i) sig << lo[i] << '-' << hi[i] << ',';
+  sig << '|';
+  for (uint32_t tg : ffull) sig << tg << ',';
+  sig << '|';
+  for (uint32_t tg : fhalf) sig << tg << ',';
+  if (sig.str() == m_duplex_sig) return;
+  m_duplex_sig = sig.str();
+  sendMsg(MsgPeerDuplexInfo(def_full, lo, hi, ffull, fhalf));
+  geulog::info("satellite", "Satellite '", m_satellite_id,
+               "': duplex info sent (default ", def_full ? "full" : "half",
+               ", ", lo.size(), " full range(s), ", ffull.size(), " full / ",
+               fhalf.size(), " half TG override(s))");
+} /* SatelliteLink::sendDuplexInfo */
+
+
+void SatelliteLink::heartbeatTick(Async::Timer* t)
+{
+  // Pick up duplex configuration changes (e.g. via the PTY CFG command).
+  if (++m_duplex_check_cnt >= 10)
+  {
+    m_duplex_check_cnt = 0;
+    sendDuplexInfo();
+  }
+
+  if (--m_hb_tx_cnt == 0)
+  {
+    m_hb_tx_cnt = HEARTBEAT_TX_CNT_RESET;
+    sendMsg(MsgPeerHeartbeat());
+  }
+
+  if (--m_hb_rx_cnt == 0)
+  {
+    geulog::error("satellite", "Satellite '", m_satellite_id,
+                  "': Heartbeat timeout — disconnecting");
+    m_heartbeat_timer.setEnable(false);
+    linkFailed(this);
+  }
+} /* SatelliteLink::heartbeatTick */
+
+
+void SatelliteLink::handleMsgPeerFilter(std::istream& is)
+{
+  MsgPeerFilter msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite", "Failed to unpack MsgPeerFilter from '",
+                  m_satellite_id, "'");
+    return;
+  }
+
+  if (msg.filter().empty())
+  {
+    // Empty filter = clear any previously set filter (allow all)
+    m_tg_filter = TgFilter();
+    geulog::info("satellite", "Satellite '", m_satellite_id,
+                 "': TG filter cleared (all TGs forwarded)");
+  }
+  else
+  {
+    m_tg_filter = TgFilter::parse(msg.filter());
+    geulog::info("satellite", "Satellite '", m_satellite_id,
+                 "': TG filter set: ", m_tg_filter.toString());
+  }
+
+  statusChanged(this);
+} /* SatelliteLink::handleMsgPeerFilter */
+
+
+bool SatelliteLink::filterPassesTg(uint32_t tg) const
+{
+  // Empty filter = no filtering = pass everything
+  if (m_tg_filter.empty()) return true;
+  return m_tg_filter.matches(tg);
+} /* SatelliteLink::filterPassesTg */
+
+
+void SatelliteLink::handleMsgPeerTgInterest(std::istream& is)
+{
+  MsgPeerTgInterest msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite", "Failed to unpack MsgPeerTgInterest from '",
+                  m_satellite_id, "'");
+    return;
+  }
+  if (!m_hello_received)
+  {
+    return;
+  }
+
+  // A satellite monitors a handful of TGs; cap the set so a misbehaving
+  // peer cannot blow up the trunk interest advertisements.
+  static const size_t MAX_SAT_INTEREST = 1000;
+  std::set<uint32_t> tgs;
+  for (uint32_t tg : msg.tgs())
+  {
+    if (tg == 0) continue;
+    if (tgs.size() >= MAX_SAT_INTEREST) break;
+    tgs.insert(tg);
+  }
+  if (tgs == m_tg_interest)
+  {
+    return;   // periodic refresh, nothing changed
+  }
+  m_tg_interest.swap(tgs);
+  std::ostringstream os;
+  for (uint32_t tg : m_tg_interest)
+  {
+    os << (os.tellp() > 0 ? "," : "") << tg;
+  }
+  geulog::info("satellite", "Satellite '", m_satellite_id,
+               "': monitors TGs ", m_tg_interest.empty() ? "(none)" : os.str());
+  m_reflector->scheduleTgInterestUpdate();
+} /* SatelliteLink::handleMsgPeerTgInterest */
+
+
+void SatelliteLink::sendQsy(uint32_t from_tg, uint32_t to_tg)
+{
+  if (!m_hello_received) return;
+  // Only satellites that carry the TG being left
+  if (!filterPassesTg(from_tg)) return;
+  geulog::info("satellite", "Satellite '", m_satellite_id, "': QSY TG #",
+               from_tg, " -> TG #", to_tg);
+  sendMsg(MsgPeerQsy(from_tg, to_tg));
+} /* SatelliteLink::sendQsy */
+
+
+void SatelliteLink::handleMsgPeerNodeList(std::istream& is)
+{
+  MsgPeerNodeList msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite", "Failed to unpack MsgPeerNodeList from '",
+                  m_satellite_id, "'");
+    return;
+  }
+
+  std::vector<MsgPeerNodeList::NodeEntry> sanitized;
+  sanitized.reserve(msg.nodes().size());
+  unsigned dropped = 0;
+  for (const auto& n : msg.nodes())
+  {
+    MsgPeerNodeList::NodeEntry e;
+    e.callsign = sanitizeIdent(n.callsign, 32);
+    if (e.callsign.empty()) { ++dropped; continue; }
+    e.tg       = n.tg;
+    e.qth_name = sanitizeText(n.qth_name, 64);
+    if (std::isfinite(n.lat) && std::isfinite(n.lon) &&
+        n.lat >= -90.0f && n.lat <= 90.0f &&
+        n.lon >= -180.0f && n.lon <= 180.0f)
+    {
+      e.lat = n.lat;
+      e.lon = n.lon;
+    }
+    e.status = n.status;
+    sanitizeJsonStrings(e.status);
+    // Stamp every entry with this satellite's id. Wire sat_id from a
+    // direct satellite is normally empty (its own clients are local to
+    // it); a non-empty value would indicate a deeper sat-of-sat
+    // hierarchy, which we collapse to a single level here.
+    e.sat_id = m_satellite_id;
+    sanitized.push_back(std::move(e));
+  }
+  if (dropped > 0)
+  {
+    geulog::warn("satellite", "'", m_satellite_id, "' dropped ", dropped,
+                 " node list entrie(s) with empty/invalid callsign");
+  }
+
+  m_reflector->onPeerNodeList(m_satellite_id, sanitized);
+  m_partner_nodes = std::move(sanitized);
+
+  // The parent's combined view changed — re-broadcast (debounced) to
+  // trunks, twin, and sibling satellites so they pick up the new sat
+  // contribution.
+  m_reflector->scheduleNodeListUpdate();
+
+  statusChanged(this);
+} /* SatelliteLink::handleMsgPeerNodeList */
+
+
+void SatelliteLink::sendNodeList(
+    const std::vector<MsgPeerNodeList::NodeEntry>& nodes)
+{
+  if (!m_hello_received) return;
+
+  // Apply this satellite's announced filter so we only forward TGs the
+  // satellite cares about (matches the audio-path scoping rule).
+  std::vector<MsgPeerNodeList::NodeEntry> filtered;
+  filtered.reserve(nodes.size());
+  for (const auto& n : nodes)
+  {
+    if (!filterPassesTg(n.tg)) continue;
+    filtered.push_back(n);
+  }
+  sendMsg(MsgPeerNodeList(filtered));
+} /* SatelliteLink::sendNodeList */
+
+
+void SatelliteLink::sendClientConnected(const std::string& callsign,
+                                        uint32_t tg,
+                                        const std::string& ip)
+{
+  if (!m_hello_received) return;
+  // TG filter applied at sender — drop if the client's TG is outside
+  // this satellite's filter.
+  //
+  // KNOWN ISSUE: V2 clients authenticate with tg=0 (TG selection happens
+  // later via select_tg), so a non-empty SATELLITE_FILTER currently
+  // suppresses every connect event. The fanoutClient{Disconnected,Rx,Status}
+  // paths in Reflector.cpp use `tg == 0 || link->filterPassesTg(tg)` to
+  // default-allow when no TG is selected yet — this method should mirror
+  // that pattern for consistency.
+  if (!filterPassesTg(tg)) return;
+  sendMsg(MsgPeerClientConnected(callsign, tg, ip));
+} /* SatelliteLink::sendClientConnected */
+
+
+void SatelliteLink::sendClientDisconnected(const std::string& callsign)
+{
+  if (!m_hello_received) return;
+  // No TG in this message — filter is applied at the caller
+  // (Reflector::fanoutClientDisconnected) using current-TG lookup.
+  sendMsg(MsgPeerClientDisconnected(callsign));
+} /* SatelliteLink::sendClientDisconnected */
+
+
+void SatelliteLink::sendClientRx(const std::string& callsign,
+                                  const std::string& rx_json)
+{
+  if (!m_hello_received) return;
+  sendMsg(MsgPeerClientRx(callsign, rx_json));
+} /* SatelliteLink::sendClientRx */
+
+
+void SatelliteLink::sendClientStatus(const std::string& callsign,
+                                      const std::string& status_json)
+{
+  if (!m_hello_received) return;
+  sendMsg(MsgPeerClientStatus(callsign, status_json));
+} /* SatelliteLink::sendClientStatus */
+
+
+void SatelliteLink::handleMsgPeerClientConnected(std::istream& is)
+{
+  MsgPeerClientConnected msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite",
+        "Failed to unpack MsgPeerClientConnected from '",
+        m_satellite_id, "'");
+    return;
+  }
+  Json::Value payload;
+  payload["tg"] = static_cast<Json::UInt>(msg.tg());
+  payload["ip"] = msg.ip();
+  if (m_reflector->mqtt() != nullptr)
+  {
+    m_reflector->mqtt()->publishPeerClientEvent(
+        m_satellite_id, msg.callsign(), "connected", payload, false);
+  }
+} /* SatelliteLink::handleMsgPeerClientConnected */
+
+
+void SatelliteLink::handleMsgPeerClientDisconnected(std::istream& is)
+{
+  MsgPeerClientDisconnected msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite",
+        "Failed to unpack MsgPeerClientDisconnected from '",
+        m_satellite_id, "'");
+    return;
+  }
+  Json::Value payload(Json::objectValue);
+  if (m_reflector->mqtt() != nullptr)
+  {
+    m_reflector->mqtt()->publishPeerClientEvent(
+        m_satellite_id, msg.callsign(), "disconnected", payload, false);
+  }
+} /* SatelliteLink::handleMsgPeerClientDisconnected */
+
+
+void SatelliteLink::handleMsgPeerClientRx(std::istream& is)
+{
+  MsgPeerClientRx msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite",
+        "Failed to unpack MsgPeerClientRx from '", m_satellite_id, "'");
+    return;
+  }
+  if (msg.rxJson().size() > 65536u) return;
+  Json::Value rx_json;
+  std::istringstream ss(msg.rxJson());
+  Json::CharReaderBuilder rb;
+  std::string err;
+  if (!Json::parseFromStream(rb, ss, &rx_json, &err))
+  {
+    return;
+  }
+  if (m_reflector->mqtt() != nullptr)
+  {
+    m_reflector->mqtt()->publishPeerClientEvent(
+        m_satellite_id, msg.callsign(), "rx", rx_json, true);
+  }
+} /* SatelliteLink::handleMsgPeerClientRx */
+
+
+void SatelliteLink::handleMsgPeerClientStatus(std::istream& is)
+{
+  MsgPeerClientStatus msg;
+  if (!msg.unpack(is))
+  {
+    geulog::error("satellite",
+        "Failed to unpack MsgPeerClientStatus from '",
+        m_satellite_id, "'");
+    return;
+  }
+  if (msg.statusJson().size() > 65536u) return;
+  Json::Value status_json;
+  std::istringstream ss(msg.statusJson());
+  Json::CharReaderBuilder rb;
+  std::string err;
+  if (!Json::parseFromStream(rb, ss, &status_json, &err))
+  {
+    return;
+  }
+  if (m_reflector->mqtt() != nullptr)
+  {
+    m_reflector->mqtt()->publishPeerClientEvent(
+        m_satellite_id, msg.callsign(), "status", status_json, true);
+  }
+} /* SatelliteLink::handleMsgPeerClientStatus */

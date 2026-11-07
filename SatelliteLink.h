@@ -1,0 +1,140 @@
+#ifndef SATELLITE_LINK_INCLUDED
+#define SATELLITE_LINK_INCLUDED
+
+#include <set>
+#include <map>
+#include <string>
+#include <vector>
+#include <sigc++/sigc++.h>
+#include <json/json.h>
+#include <AsyncFramedTcpConnection.h>
+#include <AsyncTimer.h>
+
+#include "TgFilter.h"
+#include "ReflectorMsg.h"
+
+class Reflector;
+
+/**
+@brief  Handles one inbound satellite connection on the parent reflector
+
+A SatelliteLink is created for each satellite that connects to the parent's
+satellite port. By default it relays ALL TGs bidirectionally. When the
+satellite sends a MsgPeerFilter (type 122), the parent applies the filter
+to outbound traffic — only matching TGs are forwarded to this satellite.
+The parent always wins talker arbitration over satellites.
+*/
+class SatelliteLink : public sigc::trackable
+{
+  public:
+    SatelliteLink(Reflector* reflector, Async::FramedTcpConnection* con);
+    ~SatelliteLink(void);
+
+    bool isAuthenticated(void) const { return m_hello_received; }
+    const std::string& satelliteId(void) const { return m_satellite_id; }
+    Json::Value statusJson(void) const;
+
+    /**
+     * Emitted when the satellite link has failed (heartbeat timeout).
+     * The Reflector must handle cleanup — the SatelliteLink stops its own
+     * timer but does NOT call m_con->disconnect() itself.
+     */
+    sigc::signal<void, SatelliteLink*> linkFailed;
+
+    /**
+     * Emitted whenever the per-satellite status (id, authentication,
+     * active TGs) changes. Reflector uses this to refresh the satellite's
+     * Redis snapshot. Carries `this`; ignore if satelliteId() is empty
+     * (hello not yet received).
+     */
+    sigc::signal<void, SatelliteLink*> statusChanged;
+
+    // Events from local clients or trunk peers → send down to satellite
+    void onParentTalkerStart(uint32_t tg, const std::string& callsign);
+    void onParentTalkerStop(uint32_t tg);
+    void onParentAudio(uint32_t tg, const std::vector<uint8_t>& audio);
+    void onParentFlush(uint32_t tg);
+
+    // Send a node list down to the satellite. Caller passes the combined
+    // parent-known roster minus this satellite's own contribution; this
+    // method additionally drops entries whose TG falls outside the
+    // satellite's announced filter (if any).
+    void sendNodeList(
+        const std::vector<MsgPeerNodeList::NodeEntry>& nodes);
+
+    // Per-client liveness events → send down to satellite.
+    void sendClientConnected(const std::string& callsign, uint32_t tg,
+                             const std::string& ip);
+    void sendClientDisconnected(const std::string& callsign);
+    void sendQsy(uint32_t from_tg, uint32_t to_tg);
+    void sendClientRx(const std::string& callsign,
+                      const std::string& rx_json);
+    void sendClientStatus(const std::string& callsign,
+                          const std::string& status_json);
+
+    // Read-only access to the satellite-supplied roster (this satellite's
+    // local clients), already sanitised and stamped with sat_id =
+    // satelliteId(). Used by Reflector to merge into the parent's
+    // outbound advertisements.
+    const std::vector<MsgPeerNodeList::NodeEntry>& partnerNodes(void) const
+    {
+      return m_partner_nodes;
+    }
+
+    // Returns true if the given TG passes this satellite's filter (or if no
+    // filter is set). Used by Reflector::fanoutClient{Disconnected,Rx,Status}
+    // which lack an inline TG and must look it up externally.
+    bool filterPassesTg(uint32_t tg) const;
+
+    // TGs the satellite monitors (MsgPeerTgInterest from the satellite), e.g.
+    // the TGs its own clients or a PBX's calls use. Merged into the TG
+    // interest this reflector advertises to its trunk peers (and its parent).
+    const std::set<uint32_t>& tgInterest(void) const { return m_tg_interest; }
+
+  private:
+    static const unsigned HEARTBEAT_TX_CNT_RESET = 10;
+    static const unsigned HEARTBEAT_RX_CNT_RESET = 15;
+
+    Reflector*                  m_reflector;
+    Async::FramedTcpConnection* m_con;
+    std::string                 m_resolved_secret;  // set in handleMsgPeerHello
+    std::string                 m_satellite_id;
+    bool                        m_hello_received;
+    Async::Timer                m_heartbeat_timer;
+    unsigned                    m_hb_tx_cnt;
+    unsigned                    m_hb_rx_cnt;
+    std::set<uint32_t>          m_sat_active_tgs;
+    std::map<uint32_t, std::string> m_sat_talker_cs;  // full-duplex TGs: talker callsign
+    std::string                 m_duplex_sig;          // last MsgPeerDuplexInfo sent
+    unsigned                    m_duplex_check_cnt = 0;
+    TgFilter                    m_tg_filter;
+    std::set<uint32_t>          m_tg_interest;
+    // Roster of clients attached to this satellite, learned via
+    // MsgPeerNodeList from the satellite. Each entry carries
+    // sat_id == m_satellite_id (stamped on ingest) so the Reflector can
+    // merge it into outbound trunk/twin/sibling-sat lists with correct
+    // attribution.
+    std::vector<MsgPeerNodeList::NodeEntry> m_partner_nodes;
+
+    void onFrameReceived(Async::FramedTcpConnection* con,
+                         std::vector<uint8_t>& data);
+    void handleMsgPeerHello(std::istream& is);
+    void handleMsgPeerTalkerStart(std::istream& is);
+    void handleMsgPeerTalkerStop(std::istream& is);
+    void handleMsgPeerAudio(std::istream& is);
+    void handleMsgPeerFlush(std::istream& is);
+    void handleMsgPeerHeartbeat(void);
+    void handleMsgPeerFilter(std::istream& is);
+    void handleMsgPeerTgInterest(std::istream& is);
+    void handleMsgPeerNodeList(std::istream& is);
+    void handleMsgPeerClientConnected(std::istream& is);
+    void handleMsgPeerClientDisconnected(std::istream& is);
+    void handleMsgPeerClientRx(std::istream& is);
+    void handleMsgPeerClientStatus(std::istream& is);
+    void sendMsg(const ReflectorMsg& msg);
+    void heartbeatTick(Async::Timer* t);
+    void sendDuplexInfo(void);
+    std::string mixerId(void) const { return "s:" + m_satellite_id; }
+};
+
+#endif /* SATELLITE_LINK_INCLUDED */
