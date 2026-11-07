@@ -1674,8 +1674,12 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
           else
           {
           ReflectorClient* talker = TGHandler::instance()->talkerForTG(tg);
+          // Do not grab the TG while a TCP trunk (hasTrunkTalker) OR a BLV
+          // UDP trunk (blvTrunkOwnsTG) talker holds it -- otherwise the
+          // network silently splits: each side only hears its own talker.
           if ((talker == 0) &&
-              !TGHandler::instance()->hasTrunkTalker(tg))
+              !TGHandler::instance()->hasTrunkTalker(tg) &&
+              !blvTrunkOwnsTG(tg))
           {
             TGHandler::instance()->setTalkerForTG(tg, client);
             talker = TGHandler::instance()->talkerForTG(tg);
@@ -2051,6 +2055,120 @@ void Reflector::feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
     mx->writeOpus(srcid, audio, /*local=*/false, callsign);
   }
 } /* Reflector::feedMeshAudioToMixer */
+
+
+namespace {
+  long blvMsSince(const struct timeval& then, const struct timeval& now)
+  {
+    return (now.tv_sec - then.tv_sec) * 1000L +
+           (now.tv_usec - then.tv_usec) / 1000L;
+  }
+}
+
+
+/* True if a BLV UDP trunk currently owns this (local, half-duplex) TG.
+ * Expires a silent owner lazily (lost TalkerStop / dead trunk). */
+bool Reflector::blvTrunkOwnsTG(uint32_t tg)
+{
+  auto it = m_blv_owner.find(tg);
+  if (it == m_blv_owner.end())
+  {
+    return false;
+  }
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  if (blvMsSince(it->second.last_seen, now) > BLV_OWNER_TIMEOUT_MS)
+  {
+    std::cout << "BLV trunk owner " << it->second.addr
+              << " timed out on TG #" << tg << std::endl;
+    blvTrunkReleaseTG(tg, true);
+    return false;
+  }
+  return true;
+} /* Reflector::blvTrunkOwnsTG */
+
+
+/* Try to let trunk source `src` own half-duplex TG `tg`. Returns true if
+ * it owns it (newly or already) and its audio/TalkerStart may be passed on;
+ * false if the TG is held by another trunk or by a local talker. */
+bool Reflector::blvTrunkClaimTG(uint32_t tg, const std::string& src,
+                                const std::string& callsign)
+{
+  struct timeval now;
+  gettimeofday(&now, NULL);
+
+  // 1. Another trunk already owns the TG -> first come, first served.
+  if (blvTrunkOwnsTG(tg))
+  {
+    BlvTrunkOwner& o = m_blv_owner[tg];
+    if (o.addr != src)
+    {
+      return false;
+    }
+    o.last_seen = now;
+    if (!callsign.empty())
+    {
+      o.callsign = callsign;
+    }
+    return true;
+  }
+
+  // 2. A local client is talking on the TG.
+  ReflectorClient* local_talker = TGHandler::instance()->talkerForTG(tg);
+  if (local_talker != nullptr)
+  {
+    // Simultaneous PTT on two reflectors: both sides see "local talker +
+    // incoming remote start". Resolve with the SAME rule on both sides so
+    // exactly one talker survives network-wide instead of a silent split.
+    struct timeval started;
+    bool young =
+        TGHandler::instance()->talkerStartTimeForTG(tg, started) &&
+        (blvMsSince(started, now) < BLV_CONFLICT_WINDOW_MS);
+    bool remote_wins = young && !callsign.empty() &&
+                       (callsign < local_talker->callsign());
+    if (!remote_wins)
+    {
+      return false;  // local talker keeps the TG
+    }
+    std::cout << "Talker conflict on TG #" << tg << ": " << callsign
+              << " (trunk " << src << ") wins over local "
+              << local_talker->callsign() << std::endl;
+    // Fires onTalkerUpdated -> TalkerStop to clients and to the trunks.
+    TGHandler::instance()->setTalkerForTG(tg, nullptr);
+  }
+
+  BlvTrunkOwner o;
+  o.addr = src;
+  o.callsign = callsign;
+  o.last_seen = now;
+  m_blv_owner[tg] = o;
+  return true;
+} /* Reflector::blvTrunkClaimTG */
+
+
+void Reflector::blvTrunkReleaseTG(uint32_t tg, bool notify_clients)
+{
+  auto it = m_blv_owner.find(tg);
+  if (it == m_blv_owner.end())
+  {
+    return;
+  }
+  std::string cs = it->second.callsign;
+  m_trunk_talker.erase(std::make_pair(tg, it->second.addr));
+  m_blv_owner.erase(it);
+  if (notify_clients)
+  {
+    auto ge_v2_client_filter =
+        ReflectorClient::ProtoVerLargerOrEqualFilter(ProtoVer(2, 0));
+    broadcastMsg(MsgTalkerStop(tg, cs),
+        ReflectorClient::mkAndFilter(
+            ge_v2_client_filter,
+            ReflectorClient::mkOrFilter(
+                ReflectorClient::TgFilter(tg),
+                ReflectorClient::TgMonitorFilter(tg))));
+    broadcastUdpMsg(MsgUdpFlushSamples(), ReflectorClient::TgFilter(tg));
+  }
+} /* Reflector::blvTrunkReleaseTG */
 
 
 void Reflector::feedSatelliteAudioToMixer(uint32_t tg, const std::string& srcid,
@@ -6153,41 +6271,34 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
             }
 
 
-        /*
-            if (ReflectorTrunkManager::instance()->getLastTalker(msg.tg) != addr.toString())
-            {
-                return;
-            }
-          */
+            const std::string src = addr.toString();
 
-            // Single-talker conflict guard only applies to half-duplex TGs. On
-            // a full-duplex TG talkerForTG() is never set (the mixer owns the
-            // TG), so skip it — otherwise, in a trunk CHAIN, this return would
-            // drop incoming trunk AUDIO (and its onward resend) whenever a local
-            // talker holds the TG.
-            if (!TGHandler::instance()->fullDuplexForTG(msg.tg))
-            {
-                ReflectorClient* local_talker =
-                    TGHandler::instance()->talkerForTG(msg.tg);
-                if (local_talker != nullptr)
-                {
-                    std::cout << "Talker conflict on" << msg.tg << "\r\n";
-                    return;
-                }
-            }
+            // Map to the LOCAL TG first: every check below (talker lock,
+            // duplex mode, callsign table) is about the local TG.
+            msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, src);
 
             // Attribute this trunk audio to a talker callsign: prefer the
-            // per-frame Talker field, else the callsign learned from the trunk
-            // TalkerStart for this incoming TG (many bridges tag only the
-            // TalkerStart, not every audio frame).
+            // per-frame Talker field, else the callsign learned from this
+            // source's TalkerStart (many bridges tag only the TalkerStart).
             std::string trunk_cs = msg.Talker;
             if (trunk_cs.empty())
             {
-                auto tcit = m_trunk_talker.find(msg.tg);
+                auto tcit = m_trunk_talker.find(std::make_pair(msg.tg, src));
                 if (tcit != m_trunk_talker.end()) { trunk_cs = tcit->second; }
             }
 
-            msg.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(msg.tg, addr.toString());
+            // Half-duplex arbitration: only ONE source (a local client or a
+            // single trunk) may own the TG. Audio from any other trunk is
+            // dropped here -- not broadcast and not relayed onward -- so a
+            // client never gets two interleaved Opus streams. Full-duplex TGs
+            // skip this: the mixer blends all sources.
+            if (!TGHandler::instance()->fullDuplexForTG(msg.tg))
+            {
+                if (!blvTrunkClaimTG(msg.tg, src, trunk_cs))
+                {
+                    return;
+                }
+            }
 
             // Trunk self-echo guard: if this trunk talker is one of OUR OWN
             // local clients on this TG, the audio has looped back over the
@@ -6324,9 +6435,33 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
         if (header_v3.talker_status == 2)
         {
+            const std::string src = addr.toString();
 
-            header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, addr.toString());
+            header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, src);
 
+            // Remember who is talking on this TG from this trunk source, so
+            // the audio frames that follow can be attributed to a callsign
+            // even when they carry none, and a local client's own loop-back
+            // can be dropped. Keyed (local tg, source) -- see Reflector.h.
+            if (!header_v3.talker.empty())
+            {
+                m_trunk_talker[std::make_pair(header_v3.tg, src)] = header_v3.talker;
+            }
+
+            // Half-duplex: claim the TG BEFORE telling local clients anything,
+            // so they never see a TalkerStart whose audio we will then drop.
+            // On a full-duplex TG there is no lock (the mixer owns the TG), and
+            // in a trunk CHAIN the start must keep propagating.
+            if (!TGHandler::instance()->fullDuplexForTG(header_v3.tg))
+            {
+                if (!blvTrunkClaimTG(header_v3.tg, src, header_v3.talker))
+                {
+                    std::cout << "Talker conflict on TG #" << header_v3.tg
+                              << ": rejected " << header_v3.talker
+                              << " from trunk " << src << std::endl;
+                    return;
+                }
+            }
 
             broadcastMsg(MsgTalkerStart(header_v3.tg, header_v3.talker),
                 ReflectorClient::mkAndFilter(
@@ -6336,31 +6471,6 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
                         ReflectorClient::TgMonitorFilter(header_v3.tg))));
 
             cout << header_v3.talker << " -> Trunk "<< addr.toString() <<": Talker start on TG #" << header_v3.tg << endl;
-
-            // Remember who is talking on this (incoming) trunk TG, so the audio
-            // frames that follow can be attributed to a callsign even when they
-            // carry none, and a local client's own loop-back can be dropped.
-            if (!header_v3.talker.empty())
-            {
-                m_trunk_talker[header_v3.tg] = header_v3.talker;
-            }
-
-            // PTT talker handler. The single-talker conflict guard only makes
-            // sense on a HALF-duplex TG; on a full-duplex TG talkerForTG() is
-            // never set (the mixer owns the TG, no single-talker lock), so skip
-            // it there. Crucial in a trunk CHAIN: this return would otherwise
-            // stop an incoming trunk TalkerStart from propagating to the next
-            // hop whenever a local talker holds the TG.
-            if (!TGHandler::instance()->fullDuplexForTG(header_v3.tg))
-            {
-                ReflectorClient* local_talker =
-                    TGHandler::instance()->talkerForTG(header_v3.tg);
-                if (local_talker != nullptr)
-                {
-                    std::cout << "Talker conflict on" << header_v3.tg << "\r\n";
-                    return;
-                }
-            }
 
             //TGHandler::instance()->setTrunkTalkerForTG(header_v3.tg, header_v3.talker);
 
@@ -6431,25 +6541,26 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
             cout << header_v3.talker << " -> Trunk d " << addr.toString() << endl;
 
 
-            // PTT talker handler 
-            ReflectorClient* local_talker = TGHandler::instance()->talkerForTG(header_v3.tg);
+            const std::string src = addr.toString();
 
-            /*
-            if (local_talker != nullptr || ReflectorTrunkManager::instance()->getLastTalker(header_v3.tg) != addr.toString())
+            // Same local-TG mapping as on TalkerStart, so erase matches store.
+            header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, src);
+            m_trunk_talker.erase(std::make_pair(header_v3.tg, src));
+
+            // Half-duplex: only the trunk that OWNS the TG may stop it. A stop
+            // from a source we rejected (another trunk, or one that lost to a
+            // local talker) must not send TalkerStop/FlushSamples to our
+            // clients -- that would cut off whoever is really talking -- and
+            // is not forwarded either, since its TalkerStart never was.
+            if (!TGHandler::instance()->fullDuplexForTG(header_v3.tg))
             {
-                return;
-             
+                auto oit = m_blv_owner.find(header_v3.tg);
+                if ((oit == m_blv_owner.end()) || (oit->second.addr != src))
+                {
+                    return;
+                }
+                blvTrunkReleaseTG(header_v3.tg, false);  // notified below
             }
-   
-
-            TGHandler::instance()->clearTrunkTalkerForTG(header_v3.tg);
-            */
-
-            // Talker stopped on this (incoming) trunk TG: forget the callsign
-            // (use the pre-remap tg, matching how it was stored on TalkerStart).
-            m_trunk_talker.erase(header_v3.tg);
-
-            header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, addr.toString());
 
             broadcastMsg(MsgTalkerStop(header_v3.tg, header_v3.talker),
                 ReflectorClient::mkAndFilter(
