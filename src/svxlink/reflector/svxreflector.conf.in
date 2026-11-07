@@ -56,6 +56,14 @@ TG_FOR_V1_CLIENTS=999
 #MIX_JITTER_MS=60
 #MIX_MAX_TALKERS=4
 #MIX_SOURCE_TIMEOUT_MS=10000
+# MIX_HANGOVER_MS: how long a source stays "active" (talker-start held) past its
+# last audio. Default 500 ms. Prevents TalkerStop/Start flapping on a steady but
+# jittery source (trunk/bridge, or an uneven node) whose packets arrive unevenly.
+#MIX_HANGOVER_MS=500
+# MIX_REPREBUF_MS: only rebuild the jitter buffer (which injects a prebuffer of
+# silence) after this long of a SUSTAINED outage, not on every late/partial
+# frame. Higher = more jitter absorbed before a gap is heard. Default 300 ms.
+#MIX_REPREBUF_MS=300
 #
 #HTTP_SRV_PORT=8080
 COMMAND_PTY=/dev/shm/reflector_ctrl

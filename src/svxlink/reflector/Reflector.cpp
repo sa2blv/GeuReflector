@@ -6297,8 +6297,8 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
         if (header_v3.talker_status == 1)
         {
 
-            cout << header_v3.talker << " -> Trunk stop " << ReflectorTrunkManager::instance()->getLastTalker(header_v3.tg);
-            cout << header_v3.talker << " -> Trunk d " << addr.toString();
+            cout << header_v3.talker << " -> Trunk stop " << ReflectorTrunkManager::instance()->getLastTalker(header_v3.tg) << endl;
+            cout << header_v3.talker << " -> Trunk d " << addr.toString() << endl;
 
 
             // PTT talker handler 
