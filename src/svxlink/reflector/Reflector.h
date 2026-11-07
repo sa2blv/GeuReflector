@@ -514,6 +514,12 @@ class Reflector : public sigc::trackable
     // old half-duplex peer sees exactly one remote talker (100% backward
     // compatible) and never flaps.
     std::map<uint32_t, int>      m_fdx_mesh_talkers;
+    // Current talker callsign per incoming-trunk TG, learned from the trunk
+    // TalkerStart (the type-101 audio frames carry no callsign of their own on
+    // every bridge). Used to drop a local client's own audio when it loops back
+    // over a trunk/bridge, so a node never hears itself (incl. simplex nodes
+    // that would otherwise get the delayed echo after releasing PTT).
+    std::map<uint32_t, std::string> m_trunk_talker;
     // Prefix bookkeeping for owner-relay decisions. m_local_prefixes holds
     // prefixes owned by this reflector (from GLOBAL/LOCAL_PREFIX);
     // m_all_prefixes is local + every peer's REMOTE_PREFIX. Populated in
