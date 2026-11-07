@@ -361,7 +361,8 @@ class Reflector : public sigc::trackable
      *  TG's mixer as a non-local source instead of the single-talker relay.
      *  Public so the link classes can call it on a DUPLEX_MODE=full TG. */
     void feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
-                              const std::vector<uint8_t>& audio);
+                              const std::vector<uint8_t>& audio,
+                              const std::string& callsign = "");
 
     /**
      * Resolve the HMAC secret to verify a satellite's MsgPeerHello.

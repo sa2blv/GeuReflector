@@ -2034,7 +2034,8 @@ void Reflector::removeFromAllMixers(ReflectorClient* client)
 
 
 void Reflector::feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
-                                     const std::vector<uint8_t>& audio)
+                                     const std::vector<uint8_t>& audio,
+                                     const std::string& callsign)
 {
   if (audio.empty())
   {
@@ -2043,7 +2044,11 @@ void Reflector::feedMeshAudioToMixer(uint32_t tg, const std::string& srcid,
   TGMixer* mx = getOrCreateMixer(tg);
   if (mx != nullptr)
   {
-    mx->writeOpus(srcid, audio, /*local=*/false);
+    // Tag the mesh source with the talker's callsign so the mixer can keep a
+    // node from hearing its own audio when it loops back over a trunk/bridge
+    // (telephone-style full duplex: own audio never returns, directly or via
+    // the mesh). Empty callsign => no suppression (unchanged behaviour).
+    mx->writeOpus(srcid, audio, /*local=*/false, callsign);
   }
 } /* Reflector::feedMeshAudioToMixer */
 
@@ -6115,7 +6120,7 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
               // of the raw single-talker relay, so it mixes with local
               // talkers and no client ever gets two overlapping Opus streams.
               feedMeshAudioToMixer(msg.tg, "u:" + addr.toString(),
-                                   msg.audioData());
+                                   msg.audioData(), msg.Talker);
             }
             else
             {
