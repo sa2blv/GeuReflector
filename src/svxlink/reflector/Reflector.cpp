@@ -1795,7 +1795,11 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
         // clients. We therefore acknowledge the flush immediately here to
         // the client who sent the flush request.
       client->sendUdpMsg(MsgUdpAllSamplesFlushed());
-      
+
+      // Full-duplex TG: one client releasing PTT must not flush the remote
+      // side -- its clients are still hearing the mix of the other talkers.
+      if ((tg > 0) && !TGHandler::instance()->fullDuplexForTG(tg))
+      {
         MSG_Trunk_Change msg_trunk;
         msg_trunk.talker_status = 5;
         msg_trunk.tg = tg;
@@ -1805,7 +1809,7 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
         msg_trunk.tg = tg;
 
         ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(tg, msg_trunk);
-      
+      }
       break;
     }
 
@@ -2254,17 +2258,18 @@ void Reflector::onMixReady(const MixResult& result)
     }
   }
 
-  // --- Mesh: this reflector's LOCAL sub-mix only (never mesh-sourced audio,
-  //     so it can never loop back) goes out as ONE collapsed stream on both
-  //     the UDP trunk and the TCP/twin links. ---
+  // --- BLV UDP trunk (tree topology): ONE stream per peer, the conference
+  //     mix minus that peer's own audio. This carries audio that came in on
+  //     another trunk (e.g. a PBX) onward together with the local talkers;
+  //     the raw per-trunk relay is skipped for full-duplex TGs, so a peer
+  //     never gets two interleaved Opus streams from us. ---
+  ReflectorTrunkManager::instance()->handleOutgoingMix(
+      result.tg, result.full, result.per_source, result.local_mix);
+
+  // --- TCP mesh/twin: this reflector's LOCAL sub-mix only (never
+  //     mesh-sourced audio, so it can never loop back in a full mesh). ---
   if (!result.local_mix.empty())
   {
-    MsgUdpAudio_trunk msg_trunk;
-    msg_trunk.audioData() = result.local_mix;
-    msg_trunk.tg = result.tg;
-    ReflectorTrunkManager::instance()->handleOutgoingAudio_width_remap(
-        result.tg, msg_trunk);
-
     if (m_is_satellite && (m_satellite_client != nullptr))
     {
       m_satellite_client->onLocalAudio(result.tg, result.local_mix);
@@ -6351,8 +6356,13 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
           	 ReflectorClient::EarliestMonitorTalkerFilter(msg.tg)))));
               
             }
-            // Send to other
-            ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_newmsg(msg.tg, msg, addr.toString());
+            // Send to other BLV trunks. On a full-duplex TG the mixer does it
+            // (onMixReady -> handleOutgoingMix: mix-minus per peer), so the
+            // raw relay would give the next hop a second, interleaved stream.
+            if (!TGHandler::instance()->fullDuplexForTG(msg.tg))
+            {
+              ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_newmsg(msg.tg, msg, addr.toString());
+            }
 
             std::string trunk_type = ReflectorTrunkManager::instance()->get_trunk_type(addr.toString());
 
@@ -6571,10 +6581,15 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 
             cout << header_v3.talker << " -> Trunk " << addr.toString() << ": Talker stop on TG #" << header_v3.tg << endl;
 
-            broadcastUdpMsg(MsgUdpFlushSamples(),
-                ReflectorClient::mkAndFilter(
-                    ReflectorClient::TgFilter(header_v3.tg),
-                    ReflectorClient::TgFilter(header_v3.tg)));
+            // Full-duplex TG: the mixer is still feeding our clients the
+            // other talkers -- flushing them would cut that audio.
+            if (!TGHandler::instance()->fullDuplexForTG(header_v3.tg))
+            {
+              broadcastUdpMsg(MsgUdpFlushSamples(),
+                  ReflectorClient::mkAndFilter(
+                      ReflectorClient::TgFilter(header_v3.tg),
+                      ReflectorClient::TgFilter(header_v3.tg)));
+            }
 
 
             ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_status_newmsg(header_v3.tg, header_v3, addr.toString());
@@ -6652,6 +6667,13 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
         {
 
 	   		 header_v3.tg = ReflectorTrunkManager::instance()->get_tg_from_dest_table(header_v3.tg, addr.toString());
+
+            // Full-duplex TG: ignore remote flushes (old peers still send
+            // one per PTT release); the mixer keeps the TG's audio going.
+            if (TGHandler::instance()->fullDuplexForTG(header_v3.tg))
+            {
+              return;
+            }
 	
 	    	broadcastUdpMsg(MsgUdpFlushSamples(),
 	        ReflectorClient::mkAndFilter(
