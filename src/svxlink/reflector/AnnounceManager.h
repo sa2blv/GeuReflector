@@ -62,7 +62,7 @@ class AnnounceManager : public sigc::trackable
 {
   public:
     /** Built-in feedback clips that the Reflector can trigger */
-    enum class Feedback { QSY_BLOCKED, QSY_DISABLED, NODE_BLOCKED };
+    enum class Feedback { QSY_BLOCKED, QSY_DISABLED, NODE_BLOCKED, ON_TALK };
 
     /**
      * @param cfg      Reflector configuration
@@ -98,6 +98,9 @@ class AnnounceManager : public sigc::trackable
     sigc::signal<void(uint32_t cid, const std::vector<uint8_t>&)> nodeFrame;
     sigc::signal<void(uint32_t cid, uint32_t tg, const std::string& cs)>
         nodeStop;
+    /** Ask the node to QSY (ANNOUNCE_ON_TALK_QSY after an info clip) */
+    sigc::signal<void(uint32_t cid, uint32_t from_tg, uint32_t to_tg)>
+        nodeQsy;
 
     /* ---------------- API ---------------- */
 
@@ -115,14 +118,24 @@ class AnnounceManager : public sigc::trackable
      *
      * Played on every attempt (one per PTT press / QSY request: a clip of
      * the same kind that is already queued or playing is not queued
-     * again), up to FEEDBACK_MAX_REPEAT times per node and kind. The
-     * counter is reset when the node selects another TG, or after
-     * FEEDBACK_RESET seconds without an attempt.
+     * again), at most <KIND>_MAX times per <KIND>_WINDOW seconds per node
+     * and kind (defaults FEEDBACK_MAX_REPEAT / FEEDBACK_WINDOW). The
+     * count is reset when the node selects another TG.
      */
     void feedback(uint32_t client_id, uint32_t tg, Feedback kind);
 
     /** The node selected another TG: reset its feedback counters */
     void nodeTgChanged(uint32_t client_id);
+
+    /**
+     * @brief  Talking on this TG plays [TG#tg] ANNOUNCE_ON_TALK_CLIP to the
+     *         talker (an info / help line). Cached, cheap per packet.
+     */
+    bool hasOnTalk(uint32_t tg);
+
+    /** [TG#tg] ANNOUNCE_ON_TALK_PRIVATE=1: the talker's audio is not
+     *  forwarded to anybody, it only triggers the clip */
+    bool onTalkPrivate(uint32_t tg);
 
     /** Stop the current announcement and clear the queue on a TG */
     void stopTg(uint32_t tg);
@@ -203,7 +216,7 @@ class AnnounceManager : public sigc::trackable
     unsigned                              m_frame_ms = 20;
     unsigned                              m_feedback_interval = 0;
     unsigned                              m_feedback_max = 5;
-    unsigned                              m_feedback_reset = 300;
+    unsigned                              m_feedback_window = 300;
     unsigned                              m_node_idle_ms = 500;
     unsigned                              m_node_max_wait = 5;
     unsigned                              m_tg_max_wait = 60;
@@ -216,13 +229,39 @@ class AnnounceManager : public sigc::trackable
     std::map<uint32_t, AnnounceScope>     m_scope_override;
     struct FeedbackState
     {
-      unsigned  count = 0;        // clips played since the last reset
-      time_t    last_attempt = 0;
-      time_t    last_played = 0;
-      uint32_t  tg = 0;
-      bool      capped_logged = false;
+      std::deque<time_t> plays;          // play times inside the window
+      unsigned           window = 300;
+      uint32_t           tg = 0;
+      bool               capped_logged = false;
     };
     std::map<std::pair<uint32_t, int>, FeedbackState> m_feedback;
+
+    struct OnTalkCfg
+    {
+      bool enabled = false;
+      bool priv = false;
+    };
+    std::map<uint32_t, OnTalkCfg>         m_ontalk_cache;
+
+    // Nodes whose ON_TALK clip was cut off by PTT: that press must not
+    // queue the clip again. Cleared by the next press (gap >= NODE_IDLE_MS).
+    std::map<uint32_t, struct timespec>   m_ontalk_aborted;
+
+    // QSY requests waiting a moment so the clip's tail is heard first
+    struct PendingQsy
+    {
+      uint32_t         cid;
+      uint32_t         from;
+      uint32_t         to;
+      unsigned         delay_ms;
+      struct timespec  since;
+    };
+    std::vector<PendingQsy>               m_pending_qsy;
+    unsigned                              m_ontalk_qsy_delay_ms = 500;
+
+    unsigned feedbackMax(uint32_t tg, Feedback kind) const;
+    unsigned feedbackWindow(uint32_t tg, Feedback kind) const;
+    const OnTalkCfg& onTalkCfg(uint32_t tg);
     std::vector<std::unique_ptr<AnnouncePlayer>> m_graveyard;
     Async::Timer                          m_poll_timer;
 
@@ -239,7 +278,8 @@ class AnnounceManager : public sigc::trackable
     void startTg(uint32_t tg, TgState& st);
     void finishTg(uint32_t tg, bool aborted);
     void startNode(uint32_t cid, NodeState& st);
-    void finishNode(uint32_t cid);
+    void finishNode(uint32_t cid, bool allow_qsy = true);
+    void scheduleOnTalkQsy(uint32_t cid, uint32_t from_tg, unsigned delay_ms);
     void bury(std::unique_ptr<AnnouncePlayer>& p);
     void updatePollTimer(void);
 };

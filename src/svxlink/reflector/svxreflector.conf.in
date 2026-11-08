@@ -394,9 +394,14 @@ Key= #Cypto key
 #DIR=/etc/svxlink/announce
 #CALLSIGN=INFO
 #TO_MESH=0                   # 0/LOCAL, 1/BOTH or TRUNK
-#FEEDBACK_MAX_REPEAT=5       # feedback clips per node and kind, 0 = no cap
-#FEEDBACK_RESET=300          # s without attempts before the count restarts
+# Feedback clips are played on every attempt, at most FEEDBACK_MAX_REPEAT
+# times per FEEDBACK_WINDOW seconds per node and kind. The count restarts
+# when the node changes TG. Per kind: <KIND>_MAX / <KIND>_WINDOW, where
+# KIND is QSY_BLOCKED, QSY_DISABLED, NODE_BLOCKED or ON_TALK.
+#FEEDBACK_MAX_REPEAT=5       # 0 = no cap
+#FEEDBACK_WINDOW=300         # sliding window in s (old name FEEDBACK_RESET)
 #FEEDBACK_MIN_INTERVAL=0     # s between two feedback clips, 0 = no limit
+#ON_TALK_QSY_DELAY_MS=500    # quiet time before ANNOUNCE_ON_TALK_QSY
 #NODE_IDLE_MS=500
 #NODE_MAX_WAIT=5
 #TG_MAX_WAIT=60
@@ -409,4 +414,13 @@ Key= #Cypto key
 #
 # Per TG: [TG#<tg>] ANNOUNCE_TO_MESH, ANNOUNCE_CALLSIGN,
 #         ANNOUNCE_QSY_BLOCKED_CLIP, ANNOUNCE_QSY_DISABLED_CLIP,
-#         ANNOUNCE_NODE_BLOCKED_CLIP
+#         ANNOUNCE_NODE_BLOCKED_CLIP, ANNOUNCE_<KIND>_MAX/_WINDOW
+#
+# Info / help TG: talking on it plays a clip back to that node only
+# (after PTT release; a new PTT press while it plays stops it).
+#[TG#9990]
+#ANNOUNCE_ON_TALK_CLIP=help
+#ANNOUNCE_ON_TALK_PRIVATE=1  # the talker's audio is not forwarded at all
+#ANNOUNCE_ON_TALK_MAX=1      # play at most once ...
+#ANNOUNCE_ON_TALK_WINDOW=900 # ... per 15 minutes (reset on TG change)
+#ANNOUNCE_ON_TALK_QSY=0      # then QSY the node to this TG (unset = stay)

@@ -1674,11 +1674,21 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
       {
         // Node feedback waits until the node has released PTT.
         m_announce->nodeAudioSeen(client->clientId());
+        const uint32_t cur_tg = TGHandler::instance()->TGForClient(client);
         if (client->isBlocked())
         {
-          m_announce->feedback(client->clientId(),
-                               TGHandler::instance()->TGForClient(client),
+          m_announce->feedback(client->clientId(), cur_tg,
                                AnnounceManager::Feedback::NODE_BLOCKED);
+        }
+        else if ((cur_tg > 0) && m_announce->hasOnTalk(cur_tg))
+        {
+          // Info / help TG: talking here plays a clip back to this node.
+          m_announce->feedback(client->clientId(), cur_tg,
+                               AnnounceManager::Feedback::ON_TALK);
+          if (m_announce->onTalkPrivate(cur_tg))
+          {
+            break;   // private: the audio goes nowhere else
+          }
         }
       }
       if (!client->isBlocked())
@@ -1842,7 +1852,8 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
 
       // Full-duplex TG: one client releasing PTT must not flush the remote
       // side -- its clients are still hearing the mix of the other talkers.
-      if ((tg > 0) && !TGHandler::instance()->fullDuplexForTG(tg))
+      if ((tg > 0) && !TGHandler::instance()->fullDuplexForTG(tg) &&
+          !((m_announce != nullptr) && m_announce->onTalkPrivate(tg)))
       {
         MSG_Trunk_Change msg_trunk;
         msg_trunk.talker_status = 5;
@@ -2575,6 +2586,8 @@ void Reflector::initAnnounce(void)
       sigc::mem_fun(*this, &Reflector::onAnnounceNodeFrame));
   m_announce->nodeStop.connect(
       sigc::mem_fun(*this, &Reflector::onAnnounceNodeStop));
+  m_announce->nodeQsy.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceNodeQsy));
 } /* Reflector::initAnnounce */
 
 
@@ -2902,6 +2915,22 @@ void Reflector::onAnnounceNodeStop(uint32_t cid, uint32_t tg,
   c->sendAnnounceUdpMsg(MsgUdpFlushSamples());
   c->setAnnounceExclusive(false);
 } /* Reflector::onAnnounceNodeStop */
+
+
+void Reflector::onAnnounceNodeQsy(uint32_t cid, uint32_t from_tg,
+                                  uint32_t to_tg)
+{
+  ReflectorClient* c =
+      ReflectorClient::lookup(static_cast<ReflectorClient::ClientId>(cid));
+  if ((c == nullptr) || !ge_v2_client_filter(c) ||
+      (TGHandler::instance()->TGForClient(c) != from_tg))
+  {
+    return;
+  }
+  geulog::info("client", c->callsign(), ": Requesting QSY from TG #",
+               from_tg, " to TG #", to_tg, " after the info clip");
+  c->sendMsg(MsgRequestQsy(to_tg));
+} /* Reflector::onAnnounceNodeQsy */
 
 
 void Reflector::httpRequestReceived(Async::HttpServerConnection *con,

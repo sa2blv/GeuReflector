@@ -50,15 +50,36 @@ namespace {
     return parseAnnounceScope(v, out);
   }
 
-  const char* feedbackKey(AnnounceManager::Feedback f)
+  // Config name of a feedback kind: <NAME>_CLIP, <NAME>_MAX, <NAME>_WINDOW
+  const char* feedbackName(AnnounceManager::Feedback f)
   {
     switch (f)
     {
-      case AnnounceManager::Feedback::QSY_BLOCKED:  return "QSY_BLOCKED_CLIP";
-      case AnnounceManager::Feedback::QSY_DISABLED: return "QSY_DISABLED_CLIP";
-      case AnnounceManager::Feedback::NODE_BLOCKED: return "NODE_BLOCKED_CLIP";
+      case AnnounceManager::Feedback::QSY_BLOCKED:  return "QSY_BLOCKED";
+      case AnnounceManager::Feedback::QSY_DISABLED: return "QSY_DISABLED";
+      case AnnounceManager::Feedback::NODE_BLOCKED: return "NODE_BLOCKED";
+      case AnnounceManager::Feedback::ON_TALK:      return "ON_TALK";
     }
     return "";
+  }
+
+  std::string feedbackKey(AnnounceManager::Feedback f)
+  {
+    return std::string(feedbackName(f)) + "_CLIP";
+  }
+
+  bool toUnsigned(const std::string& s, unsigned& out)
+  {
+    if (s.empty()) return false;
+    try
+    {
+      out = static_cast<unsigned>(std::stoul(s));
+      return true;
+    }
+    catch (...)
+    {
+      return false;
+    }
   }
 
   const unsigned POLL_MS = 100;
@@ -123,7 +144,9 @@ AnnounceManager::AnnounceManager(const Async::Config& cfg,
   getU("FRAME_MS",              m_frame_ms,          10, 60);
   getU("FEEDBACK_MIN_INTERVAL", m_feedback_interval,  0, 86400);
   getU("FEEDBACK_MAX_REPEAT",   m_feedback_max,       0, 1000);
-  getU("FEEDBACK_RESET",        m_feedback_reset,     1, 86400);
+  getU("FEEDBACK_RESET",        m_feedback_window,    1, 86400);  // old name
+  getU("FEEDBACK_WINDOW",       m_feedback_window,    1, 86400);
+  getU("ON_TALK_QSY_DELAY_MS",  m_ontalk_qsy_delay_ms, 0, 10000);
   getU("NODE_IDLE_MS",          m_node_idle_ms,       0, 10000);
   getU("NODE_MAX_WAIT",         m_node_max_wait,      0, 600);
   getU("TG_MAX_WAIT",           m_tg_max_wait,        0, 3600);
@@ -144,6 +167,14 @@ AnnounceManager::AnnounceManager(const Async::Config& cfg,
                (m_to_mesh ? "BOTH" : "LOCAL"), " codec=", m_codec);
 
   m_poll_timer.expired.connect(sigc::mem_fun(*this, &AnnounceManager::onPoll));
+
+  // ON_TALK settings are looked up per audio packet, so they are cached and
+  // the cache is dropped whenever the configuration changes (PTY CFG etc.).
+  const_cast<Async::Config&>(m_cfg).valueUpdated.connect(
+      [this](const std::string&, const std::string&)
+      {
+        m_ontalk_cache.clear();
+      });
 } /* AnnounceManager::AnnounceManager */
 
 
@@ -331,9 +362,74 @@ bool AnnounceManager::playNode(uint32_t client_id, const std::string& file,
 } /* AnnounceManager::playNode */
 
 
+unsigned AnnounceManager::feedbackMax(uint32_t tg, Feedback kind) const
+{
+  unsigned v = m_feedback_max;
+  toUnsigned(tgValue(tg, std::string(feedbackName(kind)) + "_MAX", ""), v);
+  return v;
+} /* AnnounceManager::feedbackMax */
+
+
+unsigned AnnounceManager::feedbackWindow(uint32_t tg, Feedback kind) const
+{
+  unsigned v = m_feedback_window;
+  toUnsigned(tgValue(tg, std::string(feedbackName(kind)) + "_WINDOW", ""),
+             v);
+  return std::max(1u, v);
+} /* AnnounceManager::feedbackWindow */
+
+
+const AnnounceManager::OnTalkCfg& AnnounceManager::onTalkCfg(uint32_t tg)
+{
+  auto it = m_ontalk_cache.find(tg);
+  if (it != m_ontalk_cache.end())
+  {
+    return it->second;
+  }
+  OnTalkCfg c;
+  if (tg > 0)
+  {
+    // Only per TG: a default in [ANNOUNCE] would fire on every TG.
+    const std::string sec = "TG#" + std::to_string(tg);
+    std::string v;
+    c.enabled = m_cfg.getValue(sec, "ANNOUNCE_ON_TALK_CLIP", v) && !v.empty();
+    v.clear();
+    c.priv = c.enabled &&
+             m_cfg.getValue(sec, "ANNOUNCE_ON_TALK_PRIVATE", v) &&
+             (v == "1" || upper(v) == "YES" || upper(v) == "TRUE");
+  }
+  return m_ontalk_cache[tg] = c;
+} /* AnnounceManager::onTalkCfg */
+
+
+bool AnnounceManager::hasOnTalk(uint32_t tg)
+{
+  return onTalkCfg(tg).enabled;
+} /* AnnounceManager::hasOnTalk */
+
+
+bool AnnounceManager::onTalkPrivate(uint32_t tg)
+{
+  return onTalkCfg(tg).priv;
+} /* AnnounceManager::onTalkPrivate */
+
+
 void AnnounceManager::feedback(uint32_t client_id, uint32_t tg, Feedback kind)
 {
-  std::string file = tgValue(tg, feedbackKey(kind), "");
+  if ((kind == Feedback::ON_TALK) &&
+      (m_ontalk_aborted.find(client_id) != m_ontalk_aborted.end()))
+  {
+    return;   // the press that cut the clip off does not start it again
+  }
+  std::string file;
+  if (kind == Feedback::ON_TALK)
+  {
+    m_cfg.getValue("TG#" + std::to_string(tg), "ANNOUNCE_ON_TALK_CLIP", file);
+  }
+  else
+  {
+    file = tgValue(tg, feedbackKey(kind), "");
+  }
   if (file.empty() && (kind == Feedback::QSY_DISABLED))
   {
     file = tgValue(tg, feedbackKey(Feedback::QSY_BLOCKED), "");
@@ -345,14 +441,18 @@ void AnnounceManager::feedback(uint32_t client_id, uint32_t tg, Feedback kind)
   const int k = static_cast<int>(kind);
   const time_t now = time(nullptr);
   FeedbackState& fs = m_feedback[std::make_pair(client_id, k)];
-  if ((fs.tg != tg) ||
-      ((fs.last_attempt != 0) &&
-       (now - fs.last_attempt > static_cast<time_t>(m_feedback_reset))))
+  if (fs.tg != tg)
   {
-    fs = FeedbackState();
+    fs = FeedbackState();   // another TG: start counting from zero
   }
   fs.tg = tg;
-  fs.last_attempt = now;
+  fs.window = feedbackWindow(tg, kind);
+  while (!fs.plays.empty() &&
+         (now - fs.plays.front() >= static_cast<time_t>(fs.window)))
+  {
+    fs.plays.pop_front();   // sliding window
+    fs.capped_logged = false;
+  }
 
   // One clip per attempt: the packets of one PTT press (or a repeated
   // request while the clip is still waiting/playing) do not queue more.
@@ -372,19 +472,27 @@ void AnnounceManager::feedback(uint32_t client_id, uint32_t tg, Feedback kind)
     }
   }
 
-  if ((m_feedback_max > 0) && (fs.count >= m_feedback_max))
+  const unsigned max = feedbackMax(tg, kind);
+  if ((max > 0) && (fs.plays.size() >= max))
   {
+    if (kind == Feedback::ON_TALK)
+    {
+      // Already heard it enough: still keep the info TG clear.
+      scheduleOnTalkQsy(client_id, tg,
+                        std::max(m_node_idle_ms, m_ontalk_qsy_delay_ms));
+    }
     if (!fs.capped_logged)
     {
       fs.capped_logged = true;
       geulog::info("core", "Announce: ", feedbackKey(kind), " for client ",
-                   client_id, " played ", fs.count, " times, muted until ",
-                   "it changes TG or is quiet for ", m_feedback_reset, " s");
+                   client_id, " on TG #", tg, " played ", fs.plays.size(),
+                   " times in ", fs.window, " s, muted until the window "
+                   "has passed or the node changes TG");
     }
     return;
   }
-  if ((m_feedback_interval > 0) && (fs.last_played != 0) &&
-      (now - fs.last_played < static_cast<time_t>(m_feedback_interval)))
+  if ((m_feedback_interval > 0) && !fs.plays.empty() &&
+      (now - fs.plays.back() < static_cast<time_t>(m_feedback_interval)))
   {
     return;
   }
@@ -396,13 +504,13 @@ void AnnounceManager::feedback(uint32_t client_id, uint32_t tg, Feedback kind)
                  " failed: ", err);
     return;
   }
-  fs.count++;
-  fs.last_played = now;
+  fs.plays.push_back(now);
 } /* AnnounceManager::feedback */
 
 
 void AnnounceManager::nodeTgChanged(uint32_t client_id)
 {
+  m_ontalk_aborted.erase(client_id);
   for (auto it = m_feedback.begin(); it != m_feedback.end(); )
   {
     it = (it->first.first == client_id) ? m_feedback.erase(it)
@@ -436,13 +544,18 @@ void AnnounceManager::stopNode(uint32_t client_id)
   it->second.queue.clear();
   if (it->second.player)
   {
-    finishNode(client_id);
+    finishNode(client_id, /*allow_qsy=*/false);   // stopped by the operator
   }
 } /* AnnounceManager::stopNode */
 
 
 void AnnounceManager::nodeGone(uint32_t client_id)
 {
+  m_pending_qsy.erase(
+      std::remove_if(m_pending_qsy.begin(), m_pending_qsy.end(),
+                     [client_id](const PendingQsy& q)
+                     { return q.cid == client_id; }),
+      m_pending_qsy.end());
   nodeTgChanged(client_id);   // client ids are reused: forget the counters
   auto it = m_nodes.find(client_id);
   if (it == m_nodes.end())
@@ -461,11 +574,45 @@ void AnnounceManager::nodeGone(uint32_t client_id)
 
 void AnnounceManager::nodeAudioSeen(uint32_t client_id)
 {
+  // A new PTT press (silence before it) re-arms ON_TALK after an abort.
+  auto ait = m_ontalk_aborted.find(client_id);
+  if (ait != m_ontalk_aborted.end())
+  {
+    if (msSince(ait->second) >= static_cast<long>(m_node_idle_ms))
+    {
+      m_ontalk_aborted.erase(ait);
+    }
+    else
+    {
+      clock_gettime(CLOCK_MONOTONIC, &ait->second);
+    }
+  }
+
+  // A pending QSY waits until the node has been quiet for its delay.
+  for (auto& q : m_pending_qsy)
+  {
+    if (q.cid == client_id)
+    {
+      clock_gettime(CLOCK_MONOTONIC, &q.since);
+    }
+  }
+
   auto it = m_nodes.find(client_id);
   if (it != m_nodes.end())
   {
     clock_gettime(CLOCK_MONOTONIC, &it->second.last_audio);
     it->second.wait_since = 0;
+    // PTT while the info/help clip plays: the user wants it to stop.
+    if (it->second.player &&
+        (it->second.playing_kind == static_cast<int>(Feedback::ON_TALK)))
+    {
+      geulog::info("core", "Announce: client ", client_id,
+                   " pressed PTT, stopping the ON_TALK clip");
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      m_ontalk_aborted[client_id] = now;
+      finishNode(client_id);
+    }
   }
 } /* AnnounceManager::nodeAudioSeen */
 
@@ -583,7 +730,7 @@ void AnnounceManager::startNode(uint32_t cid, NodeState& st)
 } /* AnnounceManager::startNode */
 
 
-void AnnounceManager::finishNode(uint32_t cid)
+void AnnounceManager::finishNode(uint32_t cid, bool allow_qsy)
 {
   auto it = m_nodes.find(cid);
   if ((it == m_nodes.end()) || !it->second.player)
@@ -591,13 +738,50 @@ void AnnounceManager::finishNode(uint32_t cid)
     return;
   }
   NodeState& st = it->second;
+  const int kind = st.playing_kind;
+  const uint32_t tg = st.tg;
   st.player->stop();
   bury(st.player);
   st.wait_since = 0;
   st.playing_kind = -1;
-  nodeStop(cid, st.tg, st.callsign);
+  nodeStop(cid, tg, st.callsign);
+  if (allow_qsy && (kind == static_cast<int>(Feedback::ON_TALK)))
+  {
+    // After a PTT abort the node is still transmitting: the delay restarts
+    // with each packet (nodeAudioSeen), so the QSY comes once it is quiet.
+    scheduleOnTalkQsy(cid, tg, std::max(m_node_idle_ms,
+                                        m_ontalk_qsy_delay_ms));
+  }
   updatePollTimer();
 } /* AnnounceManager::finishNode */
+
+
+void AnnounceManager::scheduleOnTalkQsy(uint32_t cid, uint32_t from_tg,
+                                        unsigned delay_ms)
+{
+  std::string v;
+  unsigned to = 0;
+  if (!m_cfg.getValue("TG#" + std::to_string(from_tg), "ANNOUNCE_ON_TALK_QSY",
+                      v) || !toUnsigned(v, to) || (to == from_tg))
+  {
+    return;   // not configured: the node stays on the TG
+  }
+  for (const auto& q : m_pending_qsy)
+  {
+    if (q.cid == cid)
+    {
+      return;
+    }
+  }
+  PendingQsy q;
+  q.cid = cid;
+  q.from = from_tg;
+  q.to = to;
+  q.delay_ms = delay_ms;
+  clock_gettime(CLOCK_MONOTONIC, &q.since);
+  m_pending_qsy.push_back(q);
+  updatePollTimer();
+} /* AnnounceManager::scheduleOnTalkQsy */
 
 
 void AnnounceManager::bury(std::unique_ptr<AnnouncePlayer>& p)
@@ -610,7 +794,7 @@ void AnnounceManager::bury(std::unique_ptr<AnnouncePlayer>& p)
 
 void AnnounceManager::updatePollTimer(void)
 {
-  bool need = !m_graveyard.empty();
+  bool need = !m_graveyard.empty() || !m_pending_qsy.empty();
   for (const auto& kv : m_tgs)
   {
     need = need || kv.second.player || !kv.second.queue.empty();
@@ -705,11 +889,38 @@ void AnnounceManager::onPoll(Async::Timer* t)
     }
   }
 
-  // Forget feedback counters that have expired anyway
+  for (auto it = m_pending_qsy.begin(); it != m_pending_qsy.end(); )
+  {
+    if (msSince(it->since) < static_cast<long>(it->delay_ms))
+    {
+      ++it;
+      continue;
+    }
+    const PendingQsy q = *it;
+    it = m_pending_qsy.erase(it);
+    // Only if the node is still on the info TG and not busy with a clip
+    auto nit = m_nodes.find(q.cid);
+    if ((nodeTg ? nodeTg(q.cid) : -1) == static_cast<int64_t>(q.from) &&
+        ((nit == m_nodes.end()) || !nit->second.player))
+    {
+      geulog::info("core", "Announce: QSY client ", q.cid, " from TG #",
+                   q.from, " to TG #", q.to, " (ANNOUNCE_ON_TALK_QSY)");
+      nodeQsy(q.cid, q.from, q.to);
+    }
+  }
+
+  for (auto it = m_ontalk_aborted.begin(); it != m_ontalk_aborted.end(); )
+  {
+    it = (msSince(it->second) >= static_cast<long>(m_node_idle_ms))
+           ? m_ontalk_aborted.erase(it) : std::next(it);
+  }
+
+  // Forget feedback counters whose window has passed anyway
   for (auto it = m_feedback.begin(); it != m_feedback.end(); )
   {
-    if (now - it->second.last_attempt >
-        static_cast<time_t>(m_feedback_reset) + 60)
+    if (it->second.plays.empty() ||
+        (now - it->second.plays.back() >
+         static_cast<time_t>(it->second.window)))
     {
       it = m_feedback.erase(it);
     }

@@ -679,6 +679,7 @@ class Reflector : public sigc::trackable
     void onAnnounceNodeStart(uint32_t cid, uint32_t tg, const std::string& cs);
     void onAnnounceNodeFrame(uint32_t cid, const std::vector<uint8_t>& frame);
     void onAnnounceNodeStop(uint32_t cid, uint32_t tg, const std::string& cs);
+    void onAnnounceNodeQsy(uint32_t cid, uint32_t from_tg, uint32_t to_tg);
     void announceMeshTalkerStart(uint32_t tg, const std::string& cs);
     void announceMeshAudio(uint32_t tg, const std::vector<uint8_t>& frame);
     void announceMeshTalkerStop(uint32_t tg);
