@@ -440,9 +440,13 @@ void ReflectorClient::updateIsTalker(void)
   if (m_status != nullptr)
   {
     auto talker = TGHandler::instance()->talkerForTG(m_current_tg);
+    // Half duplex: the single talker lock. Full duplex: an active source in
+    // the TG mixer (several clients can be talkers at the same time).
+    const bool fdx_talker =
+        (m_fdx_talker_tg != 0) && (m_fdx_talker_tg == m_current_tg);
     (*m_status)["isTalker"] = (
         TGHandler::instance()->showActivity(m_current_tg) &&
-        (talker == this)
+        ((talker == this) || fdx_talker)
         );
   }
 } /* ReflectorClient:;updateIsTalker */
