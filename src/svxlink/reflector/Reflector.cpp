@@ -2309,11 +2309,9 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
     if (is_sat) throw 0;
     ReflectorClient::ClientId cid =
         static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
-    const TGHandler::ClientSet& cl = TGHandler::instance()->clientsForTG(tg);
-    for (ReflectorClient* c : cl)
-    {
-      if (c->clientId() == cid) { client = c; break; }
-    }
+    // Look up by id, not by TG membership: the stop can fire after the
+    // client has already changed TG, and its talker flag must still clear.
+    client = ReflectorClient::lookup(cid);
   }
   catch (...)
   {
@@ -2322,7 +2320,7 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
 
   if (active)
   {
-    if (client != nullptr) { client->updateIsTalker(); }
+    if (client != nullptr) { client->setFdxTalkerTG(tg); }
     // Per-talker start toward LOCAL clients (dashboards/TCL show each one).
     broadcastMsg(MsgTalkerStart(tg, callsign),
         ReflectorClient::mkAndFilter(
@@ -2341,7 +2339,10 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   }
   else
   {
-    if (client != nullptr) { client->updateIsTalker(); }
+    if ((client != nullptr) && (client->fdxTalkerTG() == tg))
+    {
+      client->setFdxTalkerTG(0);
+    }
     broadcastMsg(MsgTalkerStop(tg, callsign),
         ReflectorClient::mkAndFilter(
           ge_v2_client_filter,
