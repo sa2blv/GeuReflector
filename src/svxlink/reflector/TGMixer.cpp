@@ -21,6 +21,7 @@ Licensed under the GNU General Public License v2 or later.
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 
 /****************************************************************************
@@ -358,6 +359,9 @@ void TGMixer::onTick(Async::Timer*)
   struct ActiveFrame { Source* src; const std::string* id; std::vector<float> pcm; };
   std::vector<ActiveFrame> active;
   std::map<Source*, std::vector<float>> frame_of; // active sources' own pcm
+  // Sources that actually delivered audio in THIS frame (not just hangover).
+  // Used to decide whether an active source has anything to hear at all.
+  std::set<Source*> with_audio;
 
   bool any_audio = false;
   for (auto& kv : m_sources)
@@ -413,6 +417,7 @@ void TGMixer::onTick(Async::Timer*)
 
     if (has_audio)
     {
+      with_audio.insert(src);
       src->active_hangover = m_hangover_frames;
       any_audio = true;
       for (unsigned i = 0; i < m_frame_size; ++i)
@@ -531,8 +536,17 @@ void TGMixer::onTick(Async::Timer*)
   result.full = m_cur_full;
   result.local_mix = m_cur_local;
 
-  // 3) Per active source: encode full mix minus its own audio. Cap the
-  //    number of personalised encodes; overflow sources get the full mix.
+  // 3) Per active source: encode full mix minus its own audio.
+  //
+  //    An active source ALWAYS gets an entry in per_source. An EMPTY entry
+  //    means "send nothing" (onMixReady / handleOutgoingMix skip empty
+  //    audio). A missing entry would make the caller fall back to the FULL
+  //    mix, which contains the source's own audio -> echo. So:
+  //      - nothing else audible this frame -> empty entry (no encoded
+  //        silence: a simplex node would take it as incoming traffic, and
+  //        trunk peers would ping-pong silence and stay "active")
+  //      - over MIX_MAX_TALKERS / no encoder -> empty entry (silence is
+  //        better than hearing yourself)
   unsigned produced = 0;
   for (auto& kv : m_sources)
   {
@@ -541,12 +555,33 @@ void TGMixer::onTick(Async::Timer*)
     {
       continue; // passive listener -> gets full mix
     }
-    if (produced >= m_max_talkers)
+
+    // Is there anything for this source to hear? Another source with audio
+    // in this frame, excluding itself and same-callsign copies (its own
+    // audio looping back over a trunk/bridge).
+    bool hears_something = false;
+    for (Source* o : with_audio)
     {
+      if (o == src)
+      {
+        continue;
+      }
+      if (!src->callsign.empty() && (o->callsign == src->callsign))
+      {
+        continue;
+      }
+      hears_something = true;
       break;
     }
-    if (src->encoder == nullptr)
+    if (!hears_something)
     {
+      result.per_source[kv.first]; // empty -> send nothing (NOT full mix)
+      continue;                    // does not use a MIX_MAX_TALKERS slot
+    }
+
+    if ((produced >= m_max_talkers) || (src->encoder == nullptr))
+    {
+      result.per_source[kv.first]; // empty -> silence rather than own echo
       continue;
     }
     const std::vector<float>& own = frame_of[src];
@@ -584,10 +619,8 @@ void TGMixer::onTick(Async::Timer*)
     }
     src->cur_out.clear();
     src->encoder->writeSamples(minus.data(), static_cast<int>(m_frame_size));
-    if (!src->cur_out.empty())
-    {
-      result.per_source[kv.first] = src->cur_out;
-    }
+    // Store even if empty: a missing entry would mean "full mix" (own audio).
+    result.per_source[kv.first] = src->cur_out;
     produced++;
   }
 
