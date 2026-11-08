@@ -158,6 +158,20 @@ TGMixer::TGMixer(uint32_t tg, const Async::Config& cfg)
   // is not declared idle on short gaps. MIX_HANGOVER_MS overrides per-TG/GLOBAL.
   unsigned hangover_ms = cfgUnsigned(cfg, tg, "MIX_HANGOVER_MS", 500, 0, 5000);
   m_hangover_frames = (hangover_ms + m_frame_ms - 1) / m_frame_ms;
+  // TalkerStop debounce: how long the TALKER state is held after the last voiced
+  // frame, SEPARATE from (and >=) the mix hangover above. A continuous over has
+  // natural gaps (network jitter, breaths, soft syllables); holding the talker
+  // across them means ONE clean TalkerStart...TalkerStop per over instead of a
+  // Start/Stop flap that clips word endings and trips "last talker audio
+  // timeout" downstream. Mixing still fades on the short hangover, so other
+  // listeners get no extra latency. Default 1500 ms; clamped to >= hangover.
+  unsigned talker_hang_ms =
+      cfgUnsigned(cfg, tg, "MIX_TALKER_HANG_MS", 1500, 0, 10000);
+  m_talker_hang_frames = (talker_hang_ms + m_frame_ms - 1) / m_frame_ms;
+  if (m_talker_hang_frames < m_hangover_frames)
+  {
+    m_talker_hang_frames = m_hangover_frames;
+  }
   // Only rebuild the jitter buffer (which injects a prebuffer of silence) after
   // a SUSTAINED outage, not on every late/partial frame — so transient network
   // jitter from a trunk source is absorbed instead of chopping the audio.
@@ -451,6 +465,7 @@ void TGMixer::onTick(Async::Timer*)
     if (voiced)
     {
       src->active_hangover = m_hangover_frames;
+      src->talker_hangover = m_talker_hang_frames;
       any_audio = true;
       for (unsigned i = 0; i < m_frame_size; ++i)
       {
@@ -465,9 +480,15 @@ void TGMixer::onTick(Async::Timer*)
         }
       }
     }
-    else if (src->active_hangover > 0)
+    else
     {
-      src->active_hangover--;
+      // Mix contribution fades after the short hangover (so a silence gap adds
+      // no latency for other listeners), but the TALKER state is held by its
+      // own longer hangover so a brief network gap inside one over does not fire
+      // a TalkerStop -> no Start/Stop flap, no clipped words, no "last talker
+      // audio timeout" downstream.
+      if (src->active_hangover > 0) { src->active_hangover--; }
+      if (src->talker_hangover > 0) { src->talker_hangover--; }
     }
 
     // Track idle time for source pruning (a fully idle source can be
@@ -501,7 +522,7 @@ void TGMixer::onTick(Async::Timer*)
     for (auto& kv : m_sources)
     {
       Source* src = kv.second;
-      bool now_active = (src->active_hangover > 0);
+      bool now_active = (src->talker_hangover > 0);
       if (now_active && !src->announced_active)
       {
         src->announced_active = true;
