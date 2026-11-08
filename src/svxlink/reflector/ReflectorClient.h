@@ -535,6 +535,12 @@ class ReflectorClient : public sigc::trackable
 
     void updateIsTalker(void);
 
+    /** Full-duplex TG: the TG this client is currently an active source on
+     *  in the TG mixer (0 = not talking). There is no single talker lock on
+     *  such a TG, so isTalker in the status JSON is derived from this. */
+    void setFdxTalkerTG(uint32_t tg) { m_fdx_talker_tg = tg; updateIsTalker(); }
+    uint32_t fdxTalkerTG(void) const { return m_fdx_talker_tg; }
+
     uint32_t udpCipherIVCntrNext() { return m_udp_cipher_iv_cntr++; }
     std::vector<uint8_t> udpCipherIV(void) const;
 
@@ -601,6 +607,7 @@ class ReflectorClient : public sigc::trackable
     ProtoVer                    m_client_proto_ver;
     std::vector<std::string>    m_supported_codecs;
     uint32_t                    m_current_tg;
+    uint32_t                    m_fdx_talker_tg = 0;
     std::set<uint32_t>          m_monitored_tgs;
     JsonRxMap                   m_json_rx_map;
     JsonTxMap                   m_json_tx_map;
