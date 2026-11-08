@@ -189,6 +189,17 @@ class TGMixer : public sigc::trackable
      */
     sigc::signal<void(uint32_t, const std::string&)> sourceFullDuplex;
 
+    /**
+     * @brief   Emitted when a LOCAL source is observed to be half duplex.
+     * @param   tg This mixer's talk group
+     * @param   id The source id ("c:<clientId>")
+     *
+     * Fires once when, over a window, this source and other sources were BOTH
+     * active but never in the same frame (classic take-turns / half duplex).
+     * Lets the reflector override a wrong "full" freq hint back to simplex.
+     */
+    sigc::signal<void(uint32_t, const std::string&)> sourceSimplex;
+
   private:
     static const unsigned SAMPLE_RATE = INTERNAL_SAMPLE_RATE;
 
@@ -210,6 +221,13 @@ class TGMixer : public sigc::trackable
       bool                  voiced_now = false; // delivered real audio THIS frame
       unsigned              fd_run = 0;        // consecutive frames heard-while-talking
       bool                  fd_announced = false; // full-duplex already signalled
+      // Half-duplex (take-turns) detection window: both this source and others
+      // were active within the window but never in the SAME frame => simplex.
+      unsigned              dg_frames = 0;     // frames counted in this window
+      unsigned              dg_self = 0;       // frames this source was voiced
+      unsigned              dg_other = 0;      // frames others were audible
+      unsigned              dg_overlap = 0;    // frames both at once
+      bool                  simplex_announced = false; // simplex already signalled
       std::vector<uint8_t>  cur_out;           // encoder output this frame
     };
 
@@ -224,6 +242,7 @@ class TGMixer : public sigc::trackable
     unsigned                          m_source_timeout_frames; // idle->prune
     float                             m_vox_level;       // activity level gate (peak, 0..1)
     unsigned                          m_duplex_observe_frames; // heard-while-talking frames -> full duplex
+    unsigned                          m_duplex_window_frames;  // take-turns detection window length
     std::map<std::string, Source*>    m_sources;
     Async::AudioEncoder*              m_full_encoder = nullptr;
     Async::AudioEncoder*              m_local_encoder = nullptr;

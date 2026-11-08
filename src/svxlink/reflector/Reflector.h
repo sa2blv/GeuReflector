@@ -655,6 +655,9 @@ class Reflector : public sigc::trackable
     /** A local source was observed to be full duplex (TX while RX); mark the
      *  client so its RX is no longer gated while it transmits. */
     void onSourceFullDuplex(uint32_t tg, const std::string& id);
+    /** A local source was observed to be half duplex (take-turns); override a
+     *  wrong "full" freq hint back to simplex. */
+    void onSourceSimplex(uint32_t tg, const std::string& id);
     /** Drop a client from every mixer (on disconnect); tear down an empty
      *  mixer. */
     void removeFromAllMixers(ReflectorClient* client);

@@ -1061,10 +1061,11 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
     {
       //std::cout << "### Found qth" << std::endl;
       Json::Value& qths(status["qth"]);
-      // NOTE: duplex type (simplex vs full duplex) is NOT derived from node
-      // info here. The reported RX/TX frequencies can be wrong or misleading,
-      // so the TG mixer learns full-duplex capability purely from on-air
-      // behaviour instead (see ReflectorClient::isFullDuplex).
+      // Collect RX/TX frequencies for an INITIAL duplex HINT only: same freq =>
+      // simplex, different => full. The node-info file is operator-written and
+      // may be wrong, so this is advisory -- the TG mixer overrides it in either
+      // direction from on-air behaviour (see ReflectorClient::isFullDuplex).
+      std::vector<double> rx_freqs, tx_freqs;
       for (Json::Value::ArrayIndex i=0; i<qths.size(); ++i)
       {
         Json::Value& qth(qths[i]);
@@ -1085,6 +1086,10 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
                 setRxEnabled(rx_id, false);
                 setRxSqlOpen(rx_id, false);
                 setRxActive(rx_id, false);
+                if (rx.isMember("freq") && rx["freq"].isNumeric())
+                {
+                  rx_freqs.push_back(rx["freq"].asDouble());
+                }
               }
             }
           }
@@ -1103,9 +1108,40 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
               {
                 m_json_tx_map.emplace(tx_id, tx);
                 setTxTransmit(tx_id, false);
+                if (tx.isMember("freq") && tx["freq"].isNumeric())
+                {
+                  tx_freqs.push_back(tx["freq"].asDouble());
+                }
               }
             }
           }
+        }
+      }
+      // Derive the duplex HINT: simplex iff an RX and a TX frequency coincide
+      // (same radio in/out, ~1 kHz tolerance). Only sets the advisory hint; the
+      // mixer confirms/overrides it from behaviour. No freq => hint stays as-is.
+      bool any_pair = false, simplex_pair = false;
+      for (double rxf : rx_freqs)
+      {
+        for (double txf : tx_freqs)
+        {
+          if ((rxf > 0.0) && (txf > 0.0))
+          {
+            any_pair = true;
+            const double diff = rxf - txf;
+            if ((diff < 0.001) && (diff > -0.001)) { simplex_pair = true; }
+          }
+        }
+      }
+      if (any_pair)
+      {
+        DuplexHint h = simplex_pair ? DuplexHint::Simplex : DuplexHint::Full;
+        if (h != m_duplex_hint)
+        {
+          m_duplex_hint = h;
+          geulog::info("client", "[", m_callsign, "]: duplex HINT from freq = ",
+                       (simplex_pair ? "simplex (RX==TX)" : "full (RX!=TX)"),
+                       " (advisory; behaviour overrides)");
         }
       }
     }

@@ -2020,6 +2020,7 @@ TGMixer* Reflector::getOrCreateMixer(uint32_t tg)
   mx->mixReady.connect(mem_fun(*this, &Reflector::onMixReady));
   mx->sourceActivity.connect(mem_fun(*this, &Reflector::onSourceActivity));
   mx->sourceFullDuplex.connect(mem_fun(*this, &Reflector::onSourceFullDuplex));
+  mx->sourceSimplex.connect(mem_fun(*this, &Reflector::onSourceSimplex));
   m_tg_mixers[tg] = mx;
   return mx;
 } /* Reflector::getOrCreateMixer */
@@ -2432,14 +2433,48 @@ void Reflector::onSourceFullDuplex(uint32_t tg, const std::string& id)
   {
     client = nullptr;
   }
-  if ((client != nullptr) && !client->isFullDuplex())
+  if (client != nullptr)
   {
+    // Set the sticky behavioural flag (wins over any freq hint and over a later
+    // simplex observation). The mixer emits this once per source, so logging
+    // here is not spammy.
     client->setFullDuplexObserved();
     geulog::info("client", "[", client->callsign(),
                  "]: duplex learned as FULL DUPLEX (TX while RX on TG #",
                  tg, ")");
   }
 } /* Reflector::onSourceFullDuplex */
+
+
+void Reflector::onSourceSimplex(uint32_t tg, const std::string& id)
+{
+  // The TG mixer observed this LOCAL source taking turns (active, but never at
+  // the same time as others) -> it is half duplex. Override a wrong "full" freq
+  // hint. A later genuine talk-over still upgrades it to full (that wins).
+  if (id.rfind("c:", 0) != 0)
+  {
+    return;
+  }
+  ReflectorClient* client = nullptr;
+  try
+  {
+    ReflectorClient::ClientId cid =
+        static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
+    client = ReflectorClient::lookup(cid);
+  }
+  catch (...)
+  {
+    client = nullptr;
+  }
+  if ((client != nullptr) && client->isFullDuplex() &&
+      (client->duplexHint() == ReflectorClient::DuplexHint::Full))
+  {
+    client->setSimplexObserved();
+    geulog::info("client", "[", client->callsign(),
+                 "]: duplex corrected to SIMPLEX (take-turns on TG #", tg,
+                 "; freq hint was wrong)");
+  }
+} /* Reflector::onSourceSimplex */
 
 
 void Reflector::meshConferenceTalkerStart(uint32_t tg,

@@ -541,16 +541,33 @@ class ReflectorClient : public sigc::trackable
     void setFdxTalkerTG(uint32_t tg) { m_fdx_talker_tg = tg; updateIsTalker(); }
     uint32_t fdxTalkerTG(void) const { return m_fdx_talker_tg; }
 
-    /** True once this node has been OBSERVED transmitting while there was other
-     *  audio for it to receive on the same TG, i.e. a genuine full-duplex node.
-     *  Learned purely from on-air behaviour by the TG mixer (never from node
-     *  info, which can be wrong/misleading). Default false = treat as simplex
-     *  (half duplex): a node gets NOTHING while it transmits until it proves it
-     *  can do both at once. Harmless for a real full-duplex node — while it
-     *  transmits alone there is nothing to hear anyway; the first genuine
-     *  talk-over flips it (sticky for the connection). */
-    bool isFullDuplex(void) const { return m_is_full_duplex; }
-    void setFullDuplexObserved(void) { m_is_full_duplex = true; }
+    /** Initial duplex guess from the node-info RX/TX frequency: same freq =>
+     *  simplex (half duplex), different => full duplex. Only a HINT: the file is
+     *  operator-written and may be wrong, so on-air behaviour (TG mixer) can and
+     *  does override it in either direction. Unknown when no usable freq. */
+    enum class DuplexHint { Unknown, Simplex, Full };
+    void setDuplexHint(DuplexHint h) { m_duplex_hint = h; }
+    DuplexHint duplexHint(void) const { return m_duplex_hint; }
+
+    /** Effective duplex classification used to gate RX while transmitting.
+     *  Priority: behaviour wins over the freq hint, because behaviour is ground
+     *  truth and the freq can be mis-filled.
+     *    1) observed transmitting-while-hearing-others  -> FULL  (sticky)
+     *    2) observed taking turns (half duplex) in a window -> SIMPLEX (sticky)
+     *    3) otherwise the freq hint (default: simplex = gated while TX).
+     *  A node classed simplex gets NOTHING while it transmits; a full-duplex
+     *  node keeps getting mix-minus-self and hears others while it talks. */
+    bool isFullDuplex(void) const
+    {
+      if (m_fd_confirmed_full)  { return true; }
+      if (m_fd_confirmed_simplex) { return false; }
+      return m_duplex_hint == DuplexHint::Full;
+    }
+    void setFullDuplexObserved(void) { m_fd_confirmed_full = true; }
+    void setSimplexObserved(void)
+    {
+      if (!m_fd_confirmed_full) { m_fd_confirmed_simplex = true; }
+    }
 
     uint32_t udpCipherIVCntrNext() { return m_udp_cipher_iv_cntr++; }
     std::vector<uint8_t> udpCipherIV(void) const;
@@ -619,7 +636,9 @@ class ReflectorClient : public sigc::trackable
     std::vector<std::string>    m_supported_codecs;
     uint32_t                    m_current_tg;
     uint32_t                    m_fdx_talker_tg = 0;
-    bool                        m_is_full_duplex = false; // learned on-air (TGMixer)
+    DuplexHint                  m_duplex_hint = DuplexHint::Unknown; // freq hint
+    bool                        m_fd_confirmed_full = false;    // learned on-air
+    bool                        m_fd_confirmed_simplex = false;  // learned on-air
     std::set<uint32_t>          m_monitored_tgs;
     JsonRxMap                   m_json_rx_map;
     JsonTxMap                   m_json_tx_map;
