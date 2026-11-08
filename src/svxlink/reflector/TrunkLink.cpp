@@ -1265,8 +1265,13 @@ void TrunkLink::handleMsgPeerAudio(std::istream& is)
               ReflectorClient::EarliestMonitorTalkerFilter(deliver_tg)))));
   }
 
-  // Resend to BLV sub trunk
-  m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, local_tg, Trunk_type_send);
+  // Resend to BLV sub trunk. On a full-duplex TG this peer's audio is in the
+  // mixer and reaches the BLV trunks inside the per-peer mix (onMixReady),
+  // so the raw relay would be a second, interleaved stream.
+  if (!TGHandler::instance()->fullDuplexForTG(deliver_tg))
+  {
+    m_reflector->broadcastUdpMsg_BLV_TRUNK(udp_msg, local_tg, Trunk_type_send);
+  }
     
   // Forward trunk audio to connected satellites. On a full-duplex TG the
   // mixer delivers it (full mix, mix-minus-self) in Reflector::onMixReady.
