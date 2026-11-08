@@ -2329,9 +2329,11 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   {
     if (client != nullptr) { client->setFdxTalkerTG(tg); }
 
-	      std::cout << callsign << ": Talker start on TG #" << tg
-              << " (full duplex)" << std::endl;
-	  
+    // Log exactly like the half-duplex path so svxdr's log tailer (which
+    // anchors its regex on "... on TG #<n>$" and strips [info] [client]
+    // tags) records the talker into lastheard. A trailing " (full duplex)"
+    // suffix breaks that regex -> local talkers never reach lastheard.
+    geulog::info("client", callsign, ": Talker start on TG #", tg);
     // Per-talker start toward LOCAL clients (dashboards/TCL show each one).
     broadcastMsg(MsgTalkerStart(tg, callsign),
         ReflectorClient::mkAndFilter(
@@ -2352,10 +2354,13 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   }
   else
   {
+    // Unconditional, like the start above and the half-duplex path: svxdr
+    // pairs each logged start with its stop to compute the lastheard
+    // duration, so the stop must be logged even if the client has already
+    // gone. Clearing the talker flag still needs a live client.
+    geulog::info("client", callsign, ": Talker stop on TG #", tg);
     if ((client != nullptr) && (client->fdxTalkerTG() == tg))
     {
-	  std::cout << callsign << ": Talker stop on TG #" << tg
-              << " (full duplex)" << std::endl;
       client->setFdxTalkerTG(0);
     }
     broadcastMsg(MsgTalkerStop(tg, callsign),
