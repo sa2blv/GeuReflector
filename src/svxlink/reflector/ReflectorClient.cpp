@@ -977,6 +977,10 @@ void ReflectorClient::handleSelectTG(std::istream& is)
     }
 
     setTg(sel_tg);
+    if (m_reflector != nullptr)
+    {
+      m_reflector->announceNodeTgChanged(this);
+    }
   }
 } /* ReflectorClient::handleSelectTG */
 

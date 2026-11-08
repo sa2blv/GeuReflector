@@ -227,6 +227,9 @@ class Reflector : public sigc::trackable
      */
     void requestQsy(ReflectorClient *client, uint32_t tg);
 
+    // A client selected another TG: resets its announce feedback counters.
+    void announceNodeTgChanged(ReflectorClient *client);
+
     /**
      * @brief   QSY all users of a talk group to another one
      * @param   from_tg The talk group to leave

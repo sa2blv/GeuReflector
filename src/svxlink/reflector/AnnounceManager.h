@@ -108,10 +108,21 @@ class AnnounceManager : public sigc::trackable
 
     /** Queue a clip for a single node */
     bool playNode(uint32_t client_id, const std::string& file,
-                  std::string& err);
+                  std::string& err, int kind = -1);
 
-    /** Trigger a built-in feedback clip (rate limited, may be a no-op) */
+    /**
+     * @brief Trigger a built-in feedback clip
+     *
+     * Played on every attempt (one per PTT press / QSY request: a clip of
+     * the same kind that is already queued or playing is not queued
+     * again), up to FEEDBACK_MAX_REPEAT times per node and kind. The
+     * counter is reset when the node selects another TG, or after
+     * FEEDBACK_RESET seconds without an attempt.
+     */
     void feedback(uint32_t client_id, uint32_t tg, Feedback kind);
+
+    /** The node selected another TG: reset its feedback counters */
+    void nodeTgChanged(uint32_t client_id);
 
     /** Stop the current announcement and clear the queue on a TG */
     void stopTg(uint32_t tg);
@@ -160,6 +171,7 @@ class AnnounceManager : public sigc::trackable
       std::string   file;
       AnnounceScope scope = AnnounceScope::LOCAL;
       time_t        queued = 0;
+      int           kind = -1;   // Feedback kind, -1 = not feedback
     };
 
     struct TgState
@@ -177,6 +189,7 @@ class AnnounceManager : public sigc::trackable
       std::unique_ptr<AnnouncePlayer>   player;
       uint32_t                          tg = 0;
       std::string                       callsign;
+      int                               playing_kind = -1;
       struct timespec                   last_audio = {0, 0};
       time_t                            wait_since = 0;
     };
@@ -188,7 +201,9 @@ class AnnounceManager : public sigc::trackable
     std::string                           m_callsign = "INFO";
     bool                                  m_to_mesh = false;
     unsigned                              m_frame_ms = 20;
-    unsigned                              m_feedback_interval = 30;
+    unsigned                              m_feedback_interval = 0;
+    unsigned                              m_feedback_max = 5;
+    unsigned                              m_feedback_reset = 300;
     unsigned                              m_node_idle_ms = 500;
     unsigned                              m_node_max_wait = 5;
     unsigned                              m_tg_max_wait = 60;
@@ -199,7 +214,15 @@ class AnnounceManager : public sigc::trackable
     std::map<uint32_t, TgState>           m_tgs;
     std::map<uint32_t, NodeState>         m_nodes;
     std::map<uint32_t, AnnounceScope>     m_scope_override;
-    std::map<std::pair<uint32_t, int>, time_t> m_last_feedback;
+    struct FeedbackState
+    {
+      unsigned  count = 0;        // clips played since the last reset
+      time_t    last_attempt = 0;
+      time_t    last_played = 0;
+      uint32_t  tg = 0;
+      bool      capped_logged = false;
+    };
+    std::map<std::pair<uint32_t, int>, FeedbackState> m_feedback;
     std::vector<std::unique_ptr<AnnouncePlayer>> m_graveyard;
     Async::Timer                          m_poll_timer;
 

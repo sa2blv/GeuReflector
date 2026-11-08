@@ -122,6 +122,8 @@ AnnounceManager::AnnounceManager(const Async::Config& cfg,
   };
   getU("FRAME_MS",              m_frame_ms,          10, 60);
   getU("FEEDBACK_MIN_INTERVAL", m_feedback_interval,  0, 86400);
+  getU("FEEDBACK_MAX_REPEAT",   m_feedback_max,       0, 1000);
+  getU("FEEDBACK_RESET",        m_feedback_reset,     1, 86400);
   getU("NODE_IDLE_MS",          m_node_idle_ms,       0, 10000);
   getU("NODE_MAX_WAIT",         m_node_max_wait,      0, 600);
   getU("TG_MAX_WAIT",           m_tg_max_wait,        0, 3600);
@@ -298,7 +300,7 @@ bool AnnounceManager::playTg(uint32_t tg, const std::string& file,
 
 
 bool AnnounceManager::playNode(uint32_t client_id, const std::string& file,
-                               std::string& err)
+                               std::string& err, int kind)
 {
   if (!makePlayer(file, err))
   {
@@ -320,6 +322,7 @@ bool AnnounceManager::playNode(uint32_t client_id, const std::string& file,
   Item it;
   it.file   = file;
   it.queued = time(nullptr);
+  it.kind   = kind;
   st.queue.push_back(it);
   geulog::debug("core", "Announce: queued '", file, "' for client ",
                 client_id);
@@ -339,23 +342,73 @@ void AnnounceManager::feedback(uint32_t client_id, uint32_t tg, Feedback kind)
   {
     return;
   }
-  const auto key = std::make_pair(client_id, static_cast<int>(kind));
+  const int k = static_cast<int>(kind);
   const time_t now = time(nullptr);
-  auto lit = m_last_feedback.find(key);
-  if ((lit != m_last_feedback.end()) &&
-      (now - lit->second < static_cast<time_t>(m_feedback_interval)))
+  FeedbackState& fs = m_feedback[std::make_pair(client_id, k)];
+  if ((fs.tg != tg) ||
+      ((fs.last_attempt != 0) &&
+       (now - fs.last_attempt > static_cast<time_t>(m_feedback_reset))))
+  {
+    fs = FeedbackState();
+  }
+  fs.tg = tg;
+  fs.last_attempt = now;
+
+  // One clip per attempt: the packets of one PTT press (or a repeated
+  // request while the clip is still waiting/playing) do not queue more.
+  auto nit = m_nodes.find(client_id);
+  if (nit != m_nodes.end())
+  {
+    if (nit->second.player && (nit->second.playing_kind == k))
+    {
+      return;
+    }
+    for (const auto& item : nit->second.queue)
+    {
+      if (item.kind == k)
+      {
+        return;
+      }
+    }
+  }
+
+  if ((m_feedback_max > 0) && (fs.count >= m_feedback_max))
+  {
+    if (!fs.capped_logged)
+    {
+      fs.capped_logged = true;
+      geulog::info("core", "Announce: ", feedbackKey(kind), " for client ",
+                   client_id, " played ", fs.count, " times, muted until ",
+                   "it changes TG or is quiet for ", m_feedback_reset, " s");
+    }
+    return;
+  }
+  if ((m_feedback_interval > 0) && (fs.last_played != 0) &&
+      (now - fs.last_played < static_cast<time_t>(m_feedback_interval)))
   {
     return;
   }
-  m_last_feedback[key] = now;
 
   std::string err;
-  if (!playNode(client_id, file, err))
+  if (!playNode(client_id, file, err, k))
   {
     geulog::warn("core", "Announce: feedback ", feedbackKey(kind),
                  " failed: ", err);
+    return;
   }
+  fs.count++;
+  fs.last_played = now;
 } /* AnnounceManager::feedback */
+
+
+void AnnounceManager::nodeTgChanged(uint32_t client_id)
+{
+  for (auto it = m_feedback.begin(); it != m_feedback.end(); )
+  {
+    it = (it->first.first == client_id) ? m_feedback.erase(it)
+                                        : std::next(it);
+  }
+} /* AnnounceManager::nodeTgChanged */
 
 
 void AnnounceManager::stopTg(uint32_t tg)
@@ -390,6 +443,7 @@ void AnnounceManager::stopNode(uint32_t client_id)
 
 void AnnounceManager::nodeGone(uint32_t client_id)
 {
+  nodeTgChanged(client_id);   // client ids are reused: forget the counters
   auto it = m_nodes.find(client_id);
   if (it == m_nodes.end())
   {
@@ -401,11 +455,6 @@ void AnnounceManager::nodeGone(uint32_t client_id)
     bury(it->second.player);
   }
   m_nodes.erase(it);
-  for (auto lit = m_last_feedback.begin(); lit != m_last_feedback.end(); )
-  {
-    lit = (lit->first.first == client_id) ? m_last_feedback.erase(lit)
-                                          : std::next(lit);
-  }
   updatePollTimer();
 } /* AnnounceManager::nodeGone */
 
@@ -519,6 +568,7 @@ void AnnounceManager::startNode(uint32_t cid, NodeState& st)
   }
   st.player   = std::move(p);
   st.callsign = callsignFor(st.tg);
+  st.playing_kind = item.kind;
 
   st.player->frameReady.connect([this, cid](const std::vector<uint8_t>& f)
   {
@@ -544,6 +594,7 @@ void AnnounceManager::finishNode(uint32_t cid)
   st.player->stop();
   bury(st.player);
   st.wait_since = 0;
+  st.playing_kind = -1;
   nodeStop(cid, st.tg, st.callsign);
   updatePollTimer();
 } /* AnnounceManager::finishNode */
@@ -654,12 +705,13 @@ void AnnounceManager::onPoll(Async::Timer* t)
     }
   }
 
-  // Forget old rate-limit entries
-  for (auto it = m_last_feedback.begin(); it != m_last_feedback.end(); )
+  // Forget feedback counters that have expired anyway
+  for (auto it = m_feedback.begin(); it != m_feedback.end(); )
   {
-    if (now - it->second > static_cast<time_t>(m_feedback_interval) + 60)
+    if (now - it->second.last_attempt >
+        static_cast<time_t>(m_feedback_reset) + 60)
     {
-      it = m_last_feedback.erase(it);
+      it = m_feedback.erase(it);
     }
     else
     {

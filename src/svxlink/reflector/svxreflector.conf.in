@@ -11,6 +11,8 @@ LISTEN_PORT=5300
 #SQL_TIMEOUT=600
 #SQL_TIMEOUT_BLOCKTIME=60
 #CODECS=OPUS
+# Audio announcements: name of the announce section (see [ANNOUNCE] below)
+#ANNOUNCE=ANNOUNCE
 TG_FOR_V1_CLIENTS=999
 #LOCAL_PREFIX=1
 # LOCAL_ALIASES â€” re-home short local TGs under an owned prefix so they are
@@ -378,4 +380,33 @@ TrunkTypeSend=B
 #TgMapFile=/etc/svxlink/tg_mapping.csv
 Key= #Cypto key
 
-
+#
+# Audio announcements. Optional, enabled by GLOBAL/ANNOUNCE=ANNOUNCE.
+# Clips: 16-bit PCM WAV, best 16 kHz mono, e.g.
+#   ffmpeg -i in.mp3 -ac 1 -ar 16000 -sample_fmt s16 info.wav
+# PTY: ANNOUNCE PLAY TG <tg> <file> [LOCAL|TRUNK|BOTH]
+#      ANNOUNCE PLAY NODE <callsign> <file>
+#      ANNOUNCE STOP TG <tg> | STOP NODE <callsign> | STOP ALL
+#      ANNOUNCE SCOPE <tg> <LOCAL|TRUNK|BOTH|DEFAULT>
+#      ANNOUNCE LIST
+#
+#[ANNOUNCE]
+#DIR=/etc/svxlink/announce
+#CALLSIGN=INFO
+#TO_MESH=0                   # 0/LOCAL, 1/BOTH or TRUNK
+#FEEDBACK_MAX_REPEAT=5       # feedback clips per node and kind, 0 = no cap
+#FEEDBACK_RESET=300          # s without attempts before the count restarts
+#FEEDBACK_MIN_INTERVAL=0     # s between two feedback clips, 0 = no limit
+#NODE_IDLE_MS=500
+#NODE_MAX_WAIT=5
+#TG_MAX_WAIT=60
+#MAX_QUEUE=5
+#MAX_LENGTH=120
+#GAIN_DB=0
+#QSY_BLOCKED_CLIP=qsy_blocked
+#QSY_DISABLED_CLIP=qsy_disabled
+#NODE_BLOCKED_CLIP=blocked
+#
+# Per TG: [TG#<tg>] ANNOUNCE_TO_MESH, ANNOUNCE_CALLSIGN,
+#         ANNOUNCE_QSY_BLOCKED_CLIP, ANNOUNCE_QSY_DISABLED_CLIP,
+#         ANNOUNCE_NODE_BLOCKED_CLIP

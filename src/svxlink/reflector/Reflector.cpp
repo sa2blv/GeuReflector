@@ -2578,6 +2578,15 @@ void Reflector::initAnnounce(void)
 } /* Reflector::initAnnounce */
 
 
+void Reflector::announceNodeTgChanged(ReflectorClient *client)
+{
+  if ((m_announce != nullptr) && (client != nullptr))
+  {
+    m_announce->nodeTgChanged(client->clientId());
+  }
+} /* Reflector::announceNodeTgChanged */
+
+
 bool Reflector::announceTgBusy(uint32_t tg)
 {
   if (tg == 0)
