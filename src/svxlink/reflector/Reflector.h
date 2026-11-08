@@ -234,7 +234,7 @@ class Reflector : public sigc::trackable
      * whose filter passes from_tg get MsgPeerQsy. Peter's UDP-trunk QSY
      * announce (talker_status=4) is kept separately in the callers.
      */
-    void qsyTg(uint32_t from_tg, uint32_t to_tg);
+    bool qsyTg(uint32_t from_tg, uint32_t to_tg);
 
     Async::EncryptedUdpSocket* udpSocket(void) const { return m_udp_sock; }
 

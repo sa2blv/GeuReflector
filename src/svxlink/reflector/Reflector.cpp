@@ -891,7 +891,7 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
        current_tg, " to TG #", tg);
 
   // Local clients on current_tg + any satellites carrying it.
-  qsyTg(current_tg, tg);
+  if (!qsyTg(current_tg, tg)) { return; }
 
     // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
@@ -907,11 +907,17 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
 } /* Reflector::requestQsy */
 
 
-void Reflector::qsyTg(uint32_t from_tg, uint32_t to_tg)
+bool Reflector::qsyTg(uint32_t from_tg, uint32_t to_tg)
 {
   if ((from_tg == 0) || (to_tg == 0) || (from_tg == to_tg))
   {
-    return;
+    return false;
+  }
+  if (!TGHandler::instance()->qsyAllowed(from_tg, to_tg))
+  {
+    geulog::info("core", "QSY TG #", from_tg, " -> TG #", to_tg,
+                 " blocked (QSY_BLOCK_TGS/QSY_BLOCK_TO_TGS)");
+    return false;
   }
 
   broadcastMsg(MsgRequestQsy(to_tg),
@@ -924,6 +930,7 @@ void Reflector::qsyTg(uint32_t from_tg, uint32_t to_tg)
   {
     kv.second->sendQsy(from_tg, to_tg);
   }
+  return true;
 } /* Reflector::qsyTg */
 
 
@@ -2703,7 +2710,7 @@ void Reflector::onRequestAutoQsy(uint32_t from_tg)
             " to TG #", tg);
 
   // Local clients on from_tg + any satellites carrying it.
-  qsyTg(from_tg, tg);
+  if (!qsyTg(from_tg, tg)) { return; }
 
     // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
@@ -2730,6 +2737,7 @@ uint32_t Reflector::nextRandomQsyTg(uint32_t from_tg)
     for (uint32_t cand : pool)
     {
       if ((cand != 0) && (cand != from_tg) &&
+          !TGHandler::instance()->qsyBlockedToTG(cand) &&
           TGHandler::instance()->clientsForTG(cand).empty())
       {
         return cand;
@@ -2753,7 +2761,8 @@ uint32_t Reflector::nextRandomQsyTg(uint32_t from_tg)
   {
     m_random_qsy_tg = (m_random_qsy_tg < m_random_qsy_hi) ?
       m_random_qsy_tg+1 : m_random_qsy_lo;
-    if (TGHandler::instance()->clientsForTG(m_random_qsy_tg).empty())
+    if (!TGHandler::instance()->qsyBlockedToTG(m_random_qsy_tg) &&
+        TGHandler::instance()->clientsForTG(m_random_qsy_tg).empty())
     {
       return m_random_qsy_tg;
     }
@@ -3096,7 +3105,12 @@ void Reflector::ctrlPtyDataReceived(const void *buf, size_t count)
       goto write_status;
     }
     geulog::info("core", "PTY: QSY from TG #", from_tg, " to TG #", to_tg);
-    qsyTg(from_tg, to_tg);
+    if (!qsyTg(from_tg, to_tg))
+    {
+      errss << "QSY TG #" << from_tg << " -> TG #" << to_tg
+            << " is blocked (QSY_BLOCK_TGS/QSY_BLOCK_TO_TGS)";
+      goto write_status;
+    }
     m_cmd_pty->write("QSY: TG #" + std::to_string(from_tg) + " -> TG #" +
                      std::to_string(to_tg) + "\n");
   }
@@ -6659,10 +6673,20 @@ void Reflector::on_trunk_udp_data_recived(const IpAddress& addr, uint16_t port, 
 		
 		    cout << header_v3.talker << " -> Trunk " << addr.toString() << ": Request QSY FROM TG #" << header_v3.tg << " to " << header_v3.new_tg << endl;
 		
-		    broadcastMsg(MsgRequestQsy(header_v3.new_tg),
-		        ReflectorClient::mkAndFilter(
-		            ge_v2_client_filter,
-		            ReflectorClient::TgFilter(header_v3.tg)));
+		    if (!TGHandler::instance()->qsyFollowForTG(header_v3.tg) ||
+		        !TGHandler::instance()->qsyAllowed(header_v3.tg, header_v3.new_tg))
+		    {
+		        geulog::info("trunk", "Ignoring trunk QSY TG #", header_v3.tg,
+		                     " -> TG #", header_v3.new_tg,
+		                     " (QSY_FOLLOW=0 or QSY blocked)");
+		    }
+		    else
+		    {
+		        broadcastMsg(MsgRequestQsy(header_v3.new_tg),
+		            ReflectorClient::mkAndFilter(
+		                ge_v2_client_filter,
+		                ReflectorClient::TgFilter(header_v3.tg)));
+		    }
 		
 		    ss.seekg(0);
     ReflectorTrunkManager::instance()->handleOutgoingAudio_resend_status_newmsg(header_v3.tg, header_v3, addr.toString());

@@ -41,6 +41,19 @@ TG_FOR_V1_CLIENTS=999
 #QSY_FOLLOW=1
 #QSY_TGS=240,300-310,91
 #
+# --- QSY block lists (GLOBAL, mixed list/range) ---------------------------
+#   QSY_BLOCK_TGS     never QSY users AWAY from these TGs, whatever the
+#                     source: client/DTMF request, auto-QSY, PTY QSY command,
+#                     satellite/mesh QSY and UDP-trunk QSY.
+#   QSY_BLOCK_TO_TGS  never QSY users INTO these TGs (also skipped when a
+#                     random/auto-QSY target is picked).
+# A single TG can also be set in its [TG#n] section with QSY_BLOCK=1 and/or
+# QSY_BLOCK_TO=1 (per-TG value wins over the GLOBAL list).
+# A blocked trunk QSY is still forwarded to other trunks, just not applied
+# to this reflector's own clients.
+#QSY_BLOCK_TGS=240,2400-2499
+#QSY_BLOCK_TO_TGS=91,9990-9999
+#
 # --- Full-duplex talk groups (per-TG audio conference mixing) ------------
 # Default is half-duplex (legacy single-talker) everywhere; nothing below
 # set == byte-identical old behaviour. A full-duplex TG mixes all talkers so
@@ -129,6 +142,8 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #QSY_ENABLE=1
 #QSY_FOLLOW=1
 #QSY_TGS=300-305
+#QSY_BLOCK=0
+#QSY_BLOCK_TO=0
 #ALLOW=S[A-M]\\\\d.*|LA8PV
 #ALLOW_MONITOR=S[A-M]3.*
 #SHOW_ACTIVITY=0

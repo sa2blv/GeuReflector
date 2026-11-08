@@ -677,6 +677,38 @@ void TGHandler::duplexInfo(bool& default_full, std::vector<uint32_t>& full_lo,
 } /* TGHandler::duplexInfo */
 
 
+bool TGHandler::qsyBlockedFromTG(uint32_t tg) const
+{
+  if ((m_cfg == nullptr) || (tg == 0)) { return false; }
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool v = false;
+  if (m_cfg->getValue(ss.str(), "QSY_BLOCK", v)) { return v; }
+  std::string list;
+  return m_cfg->getValue("GLOBAL", "QSY_BLOCK_TGS", list) && !list.empty() &&
+         fdx_tg_in_list(list, tg);
+} /* TGHandler::qsyBlockedFromTG */
+
+
+bool TGHandler::qsyBlockedToTG(uint32_t tg) const
+{
+  if ((m_cfg == nullptr) || (tg == 0)) { return false; }
+  std::ostringstream ss;
+  ss << "TG#" << tg;
+  bool v = false;
+  if (m_cfg->getValue(ss.str(), "QSY_BLOCK_TO", v)) { return v; }
+  std::string list;
+  return m_cfg->getValue("GLOBAL", "QSY_BLOCK_TO_TGS", list) &&
+         !list.empty() && fdx_tg_in_list(list, tg);
+} /* TGHandler::qsyBlockedToTG */
+
+
+bool TGHandler::qsyAllowed(uint32_t from_tg, uint32_t to_tg) const
+{
+  return !qsyBlockedFromTG(from_tg) && !qsyBlockedToTG(to_tg);
+} /* TGHandler::qsyAllowed */
+
+
 bool TGHandler::qsyBoolForTG(uint32_t tg, const char* key, bool def) const
 {
   if (m_cfg == nullptr) { return def; }

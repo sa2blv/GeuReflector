@@ -265,6 +265,14 @@ class TGHandler : public sigc::trackable
     // then GLOBAL, expanded to explicit TGs. Empty => not configured (the
     // caller falls back to RANDOM_QSY_RANGE).
     std::vector<uint32_t> qsyTgsForTG(uint32_t tg) const;
+    // QSY block lists (GLOBAL, mixed list/range "x,x-x,x"):
+    //   QSY_BLOCK_TGS     no QSY away from these TGs (any source).
+    //   QSY_BLOCK_TO_TGS  no QSY into these TGs (also skipped by random QSY).
+    // Per-TG [TG#n] QSY_BLOCK=1 / QSY_BLOCK_TO=1 do the same for one TG.
+    bool   qsyBlockedFromTG(uint32_t tg) const;
+    bool   qsyBlockedToTG(uint32_t tg) const;
+    // True when a QSY from_tg -> to_tg is permitted by the block lists.
+    bool   qsyAllowed(uint32_t from_tg, uint32_t to_tg) const;
     // Generic per-TG-then-GLOBAL bool config resolver.
     bool   qsyBoolForTG(uint32_t tg, const char* key, bool def) const;
 
