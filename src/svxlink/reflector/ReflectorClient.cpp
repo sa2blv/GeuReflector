@@ -1057,6 +1057,7 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
     status["protoVer"]["minorVer"] = protoVer().minorVer();
     setMonitoredTGs(m_monitored_tgs);
     setTg(m_current_tg);
+    bool any_pair = false, simplex_pair = false; // from qth rx/tx freq (below)
     if (status.isMember("qth") && status["qth"].isArray())
     {
       //std::cout << "### Found qth" << std::endl;
@@ -1117,10 +1118,8 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
           }
         }
       }
-      // Derive the duplex HINT: simplex iff an RX and a TX frequency coincide
-      // (same radio in/out, ~1 kHz tolerance). Only sets the advisory hint; the
-      // mixer confirms/overrides it from behaviour. No freq => hint stays as-is.
-      bool any_pair = false, simplex_pair = false;
+      // Simplex iff an RX and a TX frequency coincide (same radio in/out,
+      // ~1 kHz tolerance). Combined with nodeClass below into the duplex hint.
       for (double rxf : rx_freqs)
       {
         for (double txf : tx_freqs)
@@ -1133,17 +1132,36 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
           }
         }
       }
-      if (any_pair)
-      {
-        DuplexHint h = simplex_pair ? DuplexHint::Simplex : DuplexHint::Full;
-        if (h != m_duplex_hint)
-        {
-          m_duplex_hint = h;
-          geulog::info("client", "[", m_callsign, "]: duplex HINT from freq = ",
-                       (simplex_pair ? "simplex (RX==TX)" : "full (RX!=TX)"),
-                       " (advisory; behaviour overrides)");
-        }
-      }
+    }
+
+    // Duplex HINT (advisory only; the TG mixer confirms/overrides it from
+    // behaviour in either direction). Two node-info signals, both operator-
+    // written and possibly wrong:
+    //   1) qth RX/TX frequency: same => simplex, different => full (concrete
+    //      radio evidence, preferred when present).
+    //   2) nodeClass string: repeater/bridge => full, simplex/hotspot =>
+    //      simplex (used when no usable freq pair).
+    DuplexHint h = DuplexHint::Unknown;
+    const char* hsrc = "";
+    if (any_pair)
+    {
+      h = simplex_pair ? DuplexHint::Simplex : DuplexHint::Full;
+      hsrc = "freq";
+    }
+    else if (status.isMember("nodeClass") && status["nodeClass"].isString())
+    {
+      std::string nc = status["nodeClass"].asString();
+      for (auto& c : nc) { if ((c >= 'A') && (c <= 'Z')) { c = static_cast<char>(c + 32); } }
+      if ((nc == "repeater") || (nc == "bridge")) { h = DuplexHint::Full; }
+      else if ((nc == "simplex") || (nc == "hotspot")) { h = DuplexHint::Simplex; }
+      if (h != DuplexHint::Unknown) { hsrc = "nodeClass"; }
+    }
+    if ((h != DuplexHint::Unknown) && (h != m_duplex_hint))
+    {
+      m_duplex_hint = h;
+      geulog::info("client", "[", m_callsign, "]: duplex HINT from ", hsrc, " = ",
+                   (h == DuplexHint::Simplex ? "simplex" : "full"),
+                   " (advisory; behaviour overrides)");
     }
   }
   catch (const Json::Exception& e)
