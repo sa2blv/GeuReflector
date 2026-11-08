@@ -3,6 +3,8 @@
 
 #include <string>
 #include <vector>
+#include <map>
+#include <cstdint>
 #include <memory>
 #include <regex>
 #include <iostream>
@@ -215,6 +217,16 @@ public:
     void send_hello();
     void handleOutgoingAudio_width_remap(int tg, MsgUdpAudio_trunk& msg);
     void handleOutgoingAudio_width_remap_tg_send(int tg, MsgUdpAudio_trunk& msg, std::string tg_send);
+
+    /** Full-duplex TG: send one mixed stream per UDP trunk peer.
+     *  Peers with Retransmitt=1 get the full conference mix minus their own
+     *  contribution (per_source["u:<host>"] when they are an active source,
+     *  otherwise the full mix). Peers with Retransmitt=0 only get this
+     *  reflector's local sub-mix (legacy behaviour). Tree topologies only:
+     *  in a ring of retransmitting trunks the mix would circulate. */
+    void handleOutgoingMix(int tg, const std::vector<uint8_t>& full,
+        const std::map<std::string, std::vector<uint8_t>>& per_source,
+        const std::vector<uint8_t>& local_mix);
 
     void handleOutgoingMessage_width_remap(int tg, MSG_Trunk_Change& msg_trunk);
     std::vector<unsigned char> decryptAES(
