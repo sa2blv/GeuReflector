@@ -1676,6 +1676,30 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
             {
               mx->writeOpus(fdx_id, msg.audioData(), /*local=*/true,
                             client->callsign());
+
+              // Single-talker passthrough (A): when this is the only talker on
+              // the TG, forward its raw Opus straight to the other clients -- no
+              // decode/jitter/mix/encode, so zero added latency and no transcode
+              // loss. The mixer still runs (for talker state and the 2+-talker
+              // case), and onMixReady skips its client loop while this holds
+              // (result.passthrough_clients), so clients are not sent the stream
+              // twice. Mesh links still get the mixer's local_mix in onMixReady,
+              // so they are NOT forwarded here. As soon as a second talker joins,
+              // activeCount() >= 2 and the mix path takes over.
+              //
+              // Recipients are exactly onMixReady's: iterate clientsForTG() and
+              // send per client (minus the talker), so the set matches the mix
+              // path precisely -- no listener gained or lost at the switch.
+              if (mx->activeCount() <= 1)
+              {
+                for (ReflectorClient* c :
+                       TGHandler::instance()->clientsForTG(tg))
+                {
+                  if (c == client) { continue; } // never echo to the talker
+                  MsgUdpAudio out(msg.audioData());
+                  c->sendUdpMsg(out);
+                }
+              }
             }
           }
           else
@@ -2224,10 +2248,18 @@ void Reflector::onMixReady(const MixResult& result)
   // --- Local clients: mix-minus-self to active sources, full mix to the
   //     rest. A single Opus stream per client (never two) so node decoders
   //     stay in sync. ---
+  //
+  // Single-talker passthrough: when exactly one LOCAL client is talking, the
+  // Reflector has already forwarded its raw Opus straight to the other clients
+  // (zero added latency, no transcode) in handleMsgUdpAudio. Re-sending the
+  // mixer's (re-encoded, jitter-buffered) copy here would both duplicate it and
+  // add latency, so skip the client loop in that case. Mesh links below still
+  // get the mix. The lone talker itself gets nothing either way.
   const TGHandler::ClientSet& clients =
       TGHandler::instance()->clientsForTG(result.tg);
   for (ReflectorClient* c : clients)
   {
+    if (result.passthrough_clients) { break; }
     const bool is_talking = (result.tg != 0) && (c->fdxTalkerTG() == result.tg);
 
     // A node that has NOT (yet) proven it can do full duplex is treated as

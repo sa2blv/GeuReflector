@@ -531,10 +531,13 @@ void TGMixer::onTick(Async::Timer*)
   // disturb the iteration.
   {
     std::vector<std::pair<std::string, std::string>> starts, stops;
+    unsigned active = 0;
+    Source* sole = nullptr;
     for (auto& kv : m_sources)
     {
       Source* src = kv.second;
       bool now_active = (src->talker_hangover > 0);
+      if (now_active) { active++; sole = src; }
       if (now_active && !src->announced_active)
       {
         src->announced_active = true;
@@ -546,6 +549,11 @@ void TGMixer::onTick(Async::Timer*)
         stops.emplace_back(kv.first, src->callsign);
       }
     }
+    m_active_count = active;
+    // Single-talker passthrough applies only when the ONE talker is a local
+    // client: the Reflector forwards its raw Opus to the other clients. A sole
+    // mesh talker is not local, so clients still need the mix path to hear it.
+    m_single_local = (active == 1) && (sole != nullptr) && sole->is_local;
     for (auto& p : stops)  { sourceActivity(m_tg, p.first, p.second, false); }
     for (auto& p : starts) { sourceActivity(m_tg, p.first, p.second, true); }
   }
@@ -600,6 +608,8 @@ void TGMixer::onTick(Async::Timer*)
   result.tg = m_tg;
   result.full = m_cur_full;
   result.local_mix = m_cur_local;
+  result.active_sources = m_active_count;
+  result.passthrough_clients = m_single_local; // sole local talker -> raw forward
 
   // 3) Per active source: encode the full mix minus its own audio. Like
   //    Asterisk softmix (bridge_softmix.c), EVERY source that contributed

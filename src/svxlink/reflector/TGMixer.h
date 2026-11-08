@@ -92,6 +92,14 @@ struct MixResult
   // never contains audio received from a link, it can never loop back
   // through the mesh, and a remote peer never hears its own audio.
   std::vector<uint8_t>                                local_mix;
+  // Number of sources currently active (talker state held) on this TG.
+  unsigned                                            active_sources = 0;
+  // true when exactly one LOCAL client is talking: its raw Opus is forwarded
+  // straight to the other clients by the Reflector (zero added latency), so
+  // onMixReady must NOT also distribute the (re-encoded) mix to clients. Mesh
+  // links still get the mix. A sole MESH talker keeps this false (clients can
+  // only reach it via the mix path).
+  bool                                                passthrough_clients = false;
 };
 
 
@@ -140,6 +148,13 @@ class TGMixer : public sigc::trackable
      * @brief   Number of currently registered sources
      */
     size_t sourceCount(void) const { return m_sources.size(); }
+
+    /**
+     * @brief   Number of sources currently active (talking), refreshed each
+     *          onTick. <= 1 means the Reflector may forward a single client's
+     *          raw Opus directly instead of the mixed stream (low latency).
+     */
+    unsigned activeCount(void) const { return m_active_count; }
 
     /**
      * @brief   Feed one Opus packet from a source into the mix
@@ -242,6 +257,8 @@ class TGMixer : public sigc::trackable
     unsigned                          m_reprebuf_target; // samples before RESUME after a gap
     unsigned                          m_hangover_frames;
     unsigned                          m_talker_hang_frames; // TalkerStop debounce (>= hangover)
+    unsigned                          m_active_count = 0;   // sources talking now
+    bool                              m_single_local = false; // the sole talker is a local client
     unsigned                          m_reprebuf_frames; // sustained underrun -> rebuild jitter
     unsigned                          m_source_timeout_frames; // idle->prune
     float                             m_vox_level;       // activity level gate (peak, 0..1)
