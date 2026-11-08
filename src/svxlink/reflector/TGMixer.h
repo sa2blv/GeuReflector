@@ -206,6 +206,7 @@ class TGMixer : public sigc::trackable
     unsigned                          m_hangover_frames;
     unsigned                          m_reprebuf_frames; // sustained underrun -> rebuild jitter
     unsigned                          m_source_timeout_frames; // idle->prune
+    float                             m_vox_level;       // activity level gate (peak, 0..1)
     std::map<std::string, Source*>    m_sources;
     Async::AudioEncoder*              m_full_encoder = nullptr;
     Async::AudioEncoder*              m_local_encoder = nullptr;

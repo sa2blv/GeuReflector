@@ -164,6 +164,16 @@ TGMixer::TGMixer(uint32_t tg, const Async::Config& cfg)
   unsigned reprebuf_ms = cfgUnsigned(cfg, tg, "MIX_REPREBUF_MS", 300, 20, 2000);
   m_reprebuf_frames = (reprebuf_ms + m_frame_ms - 1) / m_frame_ms;
   m_source_timeout_frames = (src_timeout_ms + m_frame_ms - 1) / m_frame_ms;
+  // Activity level gate (VOX). A source counts as a talker only while its
+  // audio peak is at/above this level; below it the frame is treated as
+  // silence (not mixed, does not refresh the talker hangover) so a source
+  // that streams CONTINUOUSLY without real speech -- an open mic, codec
+  // comfort noise, or an ungated bridge/ASL link -- does not wedge the TG as
+  // a permanent talker (which held nodes keyed in TX until a restart).
+  // Expressed in permille of full scale; 0 disables the gate. Default 3 =>
+  // 0.003 (~-50 dBFS), well below speech and above comfort noise.
+  unsigned vox_permille = cfgUnsigned(cfg, tg, "MIX_VOX_LEVEL", 3, 0, 1000);
+  m_vox_level = static_cast<float>(vox_permille) / 1000.0f;
 
   m_full_encoder = makeEncoder();
   if (m_full_encoder != nullptr)
@@ -386,11 +396,20 @@ void TGMixer::onTick(Async::Timer*)
     size_t avail = std::min<size_t>(src->ring.size(), m_frame_size);
     bool has_audio = (avail > 0);
     std::vector<float> pcm(m_frame_size, 0.0f);
+    float peak = 0.0f;
     for (size_t i = 0; i < avail; ++i)
     {
       pcm[i] = src->ring.front();
       src->ring.pop_front();
+      float a = (pcm[i] < 0.0f) ? -pcm[i] : pcm[i];
+      if (a > peak) { peak = a; }
     }
+    // VOX activity gate: a source counts as a talker only while its audio is
+    // at/above m_vox_level. Below it the frame is silence as far as activity
+    // and mixing go, so a continuously-streaming source (open mic, comfort
+    // noise, ungated bridge) does not hold the TG as a permanent talker.
+    // m_vox_level == 0 disables the gate (voiced == has_audio).
+    const bool voiced = has_audio && (peak >= m_vox_level);
     if (avail < m_frame_size)
     {
       // Short/empty frame. Tolerate transient jitter: the tail of `pcm` is
@@ -411,7 +430,7 @@ void TGMixer::onTick(Async::Timer*)
       src->underrun_frames = 0;
     }
 
-    if (has_audio)
+    if (voiced)
     {
       src->active_hangover = m_hangover_frames;
       any_audio = true;
