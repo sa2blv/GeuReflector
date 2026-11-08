@@ -58,6 +58,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <AsyncEncryptedUdpSocket.h>
 #include <AsyncApplication.h>
 #include <AsyncPty.h>
+#include <AsyncAudioEncoder.h>
+#include <AsyncAudioDecoder.h>
 
 #include <common.h>
 #include <config.h>
@@ -79,6 +81,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #include <version/SVXREFLECTOR.h>
 #include "ReflectorTrunkManager.h"
 #include "ExternaConfigFetcher.h"
+#include "AnnounceManager.h"
 
 /****************************************************************************
  *
@@ -397,6 +400,8 @@ Reflector::Reflector(void)
 Reflector::~Reflector(void)
 {
   m_mqtt_status_timer.setEnable(false);
+  delete m_announce;
+  m_announce = nullptr;
   delete m_mqtt;
   m_mqtt = nullptr;
 
@@ -548,6 +553,9 @@ bool Reflector::initialize(Async::Config &cfg)
     m_cmd_pty->dataReceived.connect(
         mem_fun(*this, &Reflector::ctrlPtyDataReceived));
   }
+
+  // Optional audio announcements: GLOBAL/ANNOUNCE names the section.
+  initAnnounce();
 
   // Optional [REDIS] section — when present, Redis becomes the source
   // of truth for users/passwords/cluster/trunk dynamic settings.
@@ -878,6 +886,11 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
   {
     geulog::info("client", client->callsign(),
               ": QSY disabled for TG #", current_tg, " (QSY_ENABLE=0)");
+    if (m_announce != nullptr)
+    {
+      m_announce->feedback(client->clientId(), current_tg,
+                           AnnounceManager::Feedback::QSY_DISABLED);
+    }
     return;
   }
 
@@ -891,7 +904,15 @@ void Reflector::requestQsy(ReflectorClient *client, uint32_t tg)
        current_tg, " to TG #", tg);
 
   // Local clients on current_tg + any satellites carrying it.
-  if (!qsyTg(current_tg, tg)) { return; }
+  if (!qsyTg(current_tg, tg))
+  {
+    if (m_announce != nullptr)
+    {
+      m_announce->feedback(client->clientId(), current_tg,
+                           AnnounceManager::Feedback::QSY_BLOCKED);
+    }
+    return;
+  }
 
     // Peter's UDP-trunk QSY announce (unchanged).
     MSG_Trunk_Change msg_trunk;
@@ -1342,6 +1363,10 @@ void Reflector::clientDisconnected(Async::FramedTcpConnection *con,
   // Full-duplex: drop this client from any per-TG mixer and tear down an
   // empty mixer (self-heals the mesh talker count via sourceActivity).
   removeFromAllMixers(client);
+  if (m_announce != nullptr)
+  {
+    m_announce->nodeGone(client->clientId());
+  }
 
   if (!client->callsign().empty())
   {
@@ -1645,6 +1670,17 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
 
     case MsgUdpAudio::TYPE:
     {
+      if (m_announce != nullptr)
+      {
+        // Node feedback waits until the node has released PTT.
+        m_announce->nodeAudioSeen(client->clientId());
+        if (client->isBlocked())
+        {
+          m_announce->feedback(client->clientId(),
+                               TGHandler::instance()->TGForClient(client),
+                               AnnounceManager::Feedback::NODE_BLOCKED);
+        }
+      }
       if (!client->isBlocked())
       {
         MsgUdpAudio msg;
@@ -1686,7 +1722,8 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
           // network silently splits: each side only hears its own talker.
           if ((talker == 0) &&
               !TGHandler::instance()->hasTrunkTalker(tg) &&
-              !blvTrunkOwnsTG(tg))
+              !blvTrunkOwnsTG(tg) &&
+              !((m_announce != nullptr) && m_announce->ownsTg(tg)))
           {
             TGHandler::instance()->setTalkerForTG(tg, client);
             talker = TGHandler::instance()->talkerForTG(tg);
@@ -2461,6 +2498,403 @@ void Reflector::meshConferenceTalkerStop(uint32_t tg)
 } /* Reflector::meshConferenceTalkerStop */
 
 
+/* ===================================================================== *
+ *  Audio announcements. AnnounceManager decides WHAT and WHEN; the       *
+ *  functions below decide WHERE, reusing the same paths as a real        *
+ *  talker so trunks, BLV, satellites and twin need no protocol change.   *
+ * ===================================================================== */
+
+void Reflector::initAnnounce(void)
+{
+  std::string section;
+  if (!m_cfg->getValue("GLOBAL", "ANNOUNCE", section) || section.empty())
+  {
+    return;
+  }
+
+  // Same codec choice as ReflectorClient (first entry of GLOBAL/CODECS).
+  std::string codec;
+  std::string codecs;
+  if (m_cfg->getValue("GLOBAL", "CODECS", codecs) && !codecs.empty())
+  {
+    codec = codecs.substr(0, codecs.find(','));
+    codec.erase(0, codec.find_first_not_of(" \t"));
+    codec.erase(codec.find_last_not_of(" \t") + 1);
+  }
+  if (codec.empty())
+  {
+    codec = "GSM";
+    if (Async::AudioDecoder::isAvailable("OPUS") &&
+        Async::AudioEncoder::isAvailable("OPUS"))
+    {
+      codec = "OPUS";
+    }
+    else if (Async::AudioDecoder::isAvailable("SPEEX") &&
+             Async::AudioEncoder::isAvailable("SPEEX"))
+    {
+      codec = "SPEEX";
+    }
+  }
+
+  m_announce = new AnnounceManager(*m_cfg, section, codec);
+  m_announce->tgBusy = [this](uint32_t tg) { return announceTgBusy(tg); };
+  m_announce->tgFullDuplex = [](uint32_t tg)
+  {
+    return TGHandler::instance()->fullDuplexForTG(tg);
+  };
+  m_announce->nodeTg = [](uint32_t cid) -> int64_t
+  {
+    ReflectorClient* c =
+        ReflectorClient::lookup(static_cast<ReflectorClient::ClientId>(cid));
+    if ((c == nullptr) ||
+        (c->conState() != ReflectorClient::STATE_CONNECTED))
+    {
+      return -1;
+    }
+    return TGHandler::instance()->TGForClient(c);
+  };
+  m_announce->findNode = [](const std::string& cs, uint32_t& cid)
+  {
+    ReflectorClient* c = ReflectorClient::lookup(cs);
+    if (c == nullptr)
+    {
+      return false;
+    }
+    cid = c->clientId();
+    return true;
+  };
+  m_announce->tgStart.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceTgStart));
+  m_announce->tgFrame.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceTgFrame));
+  m_announce->tgStop.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceTgStop));
+  m_announce->nodeStart.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceNodeStart));
+  m_announce->nodeFrame.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceNodeFrame));
+  m_announce->nodeStop.connect(
+      sigc::mem_fun(*this, &Reflector::onAnnounceNodeStop));
+} /* Reflector::initAnnounce */
+
+
+bool Reflector::announceTgBusy(uint32_t tg)
+{
+  if (tg == 0)
+  {
+    return false;
+  }
+  if (TGHandler::instance()->fullDuplexForTG(tg))
+  {
+    // Local, satellite and mesh audio all pass through the mixer.
+    auto it = m_tg_mixers.find(tg);
+    return (it != m_tg_mixers.end()) &&
+           it->second->hasActiveSource("a:" + std::to_string(tg));
+  }
+  return (TGHandler::instance()->talkerForTG(tg) != nullptr) ||
+         TGHandler::instance()->hasTrunkTalker(tg) ||
+         blvTrunkOwnsTG(tg);
+} /* Reflector::announceTgBusy */
+
+
+void Reflector::announceMeshTalkerStart(uint32_t tg, const std::string& cs)
+{
+  MSG_Trunk_Change msg_trunk;
+  msg_trunk.talker_status = 2;   // talker start
+  msg_trunk.tg = tg;
+  msg_trunk.talker = cs;
+  ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(
+      tg, msg_trunk);
+
+  if (m_is_satellite && (m_satellite_client != nullptr))
+  {
+    m_satellite_client->onLocalTalkerStart(tg, cs);
+    return;
+  }
+  for (auto* link : m_trunk_links)
+  {
+    link->onLocalTalkerStart(tg, cs);
+  }
+  if (m_twin_link != nullptr)
+  {
+    m_twin_link->onLocalTalkerUpdated(tg, cs);
+  }
+} /* Reflector::announceMeshTalkerStart */
+
+
+void Reflector::announceMeshAudio(uint32_t tg,
+                                  const std::vector<uint8_t>& frame)
+{
+  MsgUdpAudio_trunk msg_trunk;
+  msg_trunk.audioData() = frame;
+  msg_trunk.tg = tg;
+  ReflectorTrunkManager::instance()->handleOutgoingAudio_width_remap(
+      tg, msg_trunk);
+
+  if (m_is_satellite && (m_satellite_client != nullptr))
+  {
+    m_satellite_client->onLocalAudio(tg, frame);
+    return;
+  }
+  for (auto* link : m_trunk_links)
+  {
+    link->onLocalAudio(tg, frame);
+  }
+  if (m_twin_link != nullptr)
+  {
+    m_twin_link->onLocalAudio(tg, frame);
+  }
+} /* Reflector::announceMeshAudio */
+
+
+void Reflector::announceMeshTalkerStop(uint32_t tg)
+{
+  MSG_Trunk_Change msg_flush;
+  msg_flush.talker_status = 5;   // flush
+  msg_flush.tg = tg;
+  msg_flush.talker = "";
+  ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(
+      tg, msg_flush);
+  MSG_Trunk_Change msg_stop;
+  msg_stop.talker_status = 1;    // talker stop
+  msg_stop.tg = tg;
+  ReflectorTrunkManager::instance()->handleOutgoingMessage_width_remap(
+      tg, msg_stop);
+
+  if (m_is_satellite && (m_satellite_client != nullptr))
+  {
+    m_satellite_client->onLocalFlush(tg);
+    m_satellite_client->onLocalTalkerStop(tg);
+    return;
+  }
+  for (auto* link : m_trunk_links)
+  {
+    link->onLocalFlush(tg);
+    link->onLocalTalkerStop(tg);
+  }
+  if (m_twin_link != nullptr)
+  {
+    m_twin_link->onLocalFlush(tg);
+    m_twin_link->onLocalTalkerUpdated(tg, "");
+  }
+} /* Reflector::announceMeshTalkerStop */
+
+
+namespace {
+  // Full-duplex LOCAL/BOTH announcements are a mixer source; TRUNK scope
+  // and every half-duplex TG are sent directly.
+  bool announceViaMixer(uint32_t tg, AnnounceScope scope)
+  {
+    return TGHandler::instance()->fullDuplexForTG(tg) &&
+           (scope != AnnounceScope::TRUNK);
+  }
+}
+
+
+void Reflector::onAnnounceTgStart(uint32_t tg, const std::string& cs,
+                                  AnnounceScope scope)
+{
+  const bool to_local = (scope != AnnounceScope::TRUNK);
+  const bool to_mesh  = (scope != AnnounceScope::LOCAL);
+  const bool mixed    = announceViaMixer(tg, scope);
+
+  if (to_local)
+  {
+    broadcastMsg(MsgTalkerStart(tg, cs),
+        ReflectorClient::mkAndFilter(
+          ge_v2_client_filter, ReflectorClient::TgFilter(tg)));
+    if (tg == tgForV1Clients())
+    {
+      broadcastMsg(MsgTalkerStartV1(cs), v1_client_filter);
+    }
+    if (m_mqtt != nullptr) { m_mqtt->onTalkerStart(tg, cs, false); }
+  }
+
+  if (mixed && to_mesh)
+  {
+    // One collapsed talker toward the mesh, shared with local talkers.
+    // (Also tells downstream satellites.)
+    meshConferenceTalkerStart(tg, cs);
+    return;
+  }
+  if (to_local && !m_is_satellite)
+  {
+    for (auto& kv : m_satellite_con_map)
+    {
+      kv.second->onParentTalkerStart(tg, cs);
+    }
+  }
+  if (to_mesh)
+  {
+    announceMeshTalkerStart(tg, cs);
+  }
+} /* Reflector::onAnnounceTgStart */
+
+
+void Reflector::onAnnounceTgFrame(uint32_t tg,
+                                  const std::vector<uint8_t>& frame,
+                                  AnnounceScope scope)
+{
+  const bool to_local = (scope != AnnounceScope::TRUNK);
+  const bool to_mesh  = (scope != AnnounceScope::LOCAL);
+
+  if (announceViaMixer(tg, scope))
+  {
+    // local=true puts it in local_mix, i.e. on the trunks; local=false
+    // keeps it to own clients, satellites (and BLV peers that relay the
+    // full conference mix).
+    TGMixer* mx = getOrCreateMixer(tg);
+    if (mx != nullptr)
+    {
+      mx->writeOpus("a:" + std::to_string(tg), frame,
+                    /*local=*/to_mesh, m_announce->callsignFor(tg));
+    }
+    return;
+  }
+
+  if (to_local)
+  {
+    broadcastUdpMsg(MsgUdpAudio(frame), ReflectorClient::TgFilter(tg));
+    if (!m_is_satellite)
+    {
+      for (auto& kv : m_satellite_con_map)
+      {
+        kv.second->onParentAudio(tg, frame);
+      }
+    }
+  }
+  if (to_mesh)
+  {
+    announceMeshAudio(tg, frame);
+  }
+} /* Reflector::onAnnounceTgFrame */
+
+
+void Reflector::onAnnounceTgStop(uint32_t tg, const std::string& cs,
+                                 AnnounceScope scope)
+{
+  const bool to_local = (scope != AnnounceScope::TRUNK);
+  const bool to_mesh  = (scope != AnnounceScope::LOCAL);
+  const bool mixed    = announceViaMixer(tg, scope);
+
+  if (mixed)
+  {
+    auto it = m_tg_mixers.find(tg);
+    if (it != m_tg_mixers.end())
+    {
+      it->second->removeSource("a:" + std::to_string(tg));
+      if (it->second->sourceCount() == 0)
+      {
+        delete it->second;
+        m_tg_mixers.erase(it);
+      }
+    }
+  }
+
+  if (to_local)
+  {
+    broadcastMsg(MsgTalkerStop(tg, cs),
+        ReflectorClient::mkAndFilter(
+          ge_v2_client_filter, ReflectorClient::TgFilter(tg)));
+    if (tg == tgForV1Clients())
+    {
+      broadcastMsg(MsgTalkerStopV1(cs), v1_client_filter);
+    }
+    if (!mixed)
+    {
+      // In full duplex the mix keeps flowing for the other talkers.
+      broadcastUdpMsg(MsgUdpFlushSamples(), ReflectorClient::TgFilter(tg));
+    }
+    if (m_mqtt != nullptr) { m_mqtt->onTalkerStop(tg, cs, false); }
+  }
+
+  if (mixed && to_mesh)
+  {
+    meshConferenceTalkerStop(tg);
+    return;
+  }
+  if (to_local && !m_is_satellite)
+  {
+    for (auto& kv : m_satellite_con_map)
+    {
+      if (!mixed)
+      {
+        kv.second->onParentFlush(tg);
+      }
+      kv.second->onParentTalkerStop(tg);
+    }
+  }
+  if (to_mesh)
+  {
+    announceMeshTalkerStop(tg);
+  }
+} /* Reflector::onAnnounceTgStop */
+
+
+void Reflector::onAnnounceNodeStart(uint32_t cid, uint32_t tg,
+                                    const std::string& cs)
+{
+  ReflectorClient* c =
+      ReflectorClient::lookup(static_cast<ReflectorClient::ClientId>(cid));
+  if (c == nullptr)
+  {
+    return;
+  }
+  // Another stream may be on its way to this node (NODE_MAX_WAIT expired):
+  // cut it off and reset the node's decoder before the clip.
+  const bool busy = announceTgBusy(tg) ||
+                    ((m_announce != nullptr) && m_announce->isPlayingTg(tg));
+  c->setAnnounceExclusive(true);
+  if (busy)
+  {
+    c->sendAnnounceUdpMsg(MsgUdpFlushSamples());
+  }
+  if (ge_v2_client_filter(c))
+  {
+    c->sendMsg(MsgTalkerStart(tg, cs));
+  }
+  else
+  {
+    c->sendMsg(MsgTalkerStartV1(cs));
+  }
+  geulog::info("client", c->callsign(), ": Playing announcement as ", cs);
+} /* Reflector::onAnnounceNodeStart */
+
+
+void Reflector::onAnnounceNodeFrame(uint32_t cid,
+                                    const std::vector<uint8_t>& frame)
+{
+  ReflectorClient* c =
+      ReflectorClient::lookup(static_cast<ReflectorClient::ClientId>(cid));
+  if (c != nullptr)
+  {
+    c->sendAnnounceUdpMsg(MsgUdpAudio(frame));
+  }
+} /* Reflector::onAnnounceNodeFrame */
+
+
+void Reflector::onAnnounceNodeStop(uint32_t cid, uint32_t tg,
+                                   const std::string& cs)
+{
+  ReflectorClient* c =
+      ReflectorClient::lookup(static_cast<ReflectorClient::ClientId>(cid));
+  if (c == nullptr)
+  {
+    return;
+  }
+  if (ge_v2_client_filter(c))
+  {
+    c->sendMsg(MsgTalkerStop(tg, cs));
+  }
+  else
+  {
+    c->sendMsg(MsgTalkerStopV1(cs));
+  }
+  c->sendAnnounceUdpMsg(MsgUdpFlushSamples());
+  c->setAnnounceExclusive(false);
+} /* Reflector::onAnnounceNodeStop */
+
+
 void Reflector::httpRequestReceived(Async::HttpServerConnection *con,
                                     Async::HttpServerConnection::Request& req)
 {
@@ -3118,9 +3552,24 @@ void Reflector::ctrlPtyDataReceived(const void *buf, size_t count)
     m_cmd_pty->write("QSY: TG #" + std::to_string(from_tg) + " -> TG #" +
                      std::to_string(to_tg) + "\n");
   }
+  else if (cmd == "ANNOUNCE")
+  {
+    if (m_announce == nullptr)
+    {
+      errss << "Announcements are disabled (set GLOBAL/ANNOUNCE to the name "
+               "of an announce section, e.g. ANNOUNCE=ANNOUNCE)";
+      goto write_status;
+    }
+    std::ostringstream outss;
+    m_announce->handlePtyCommand(ss, outss, errss);
+    if (errss.str().empty() && !outss.str().empty())
+    {
+      m_cmd_pty->write(outss.str());
+    }
+  }
   else
   {
-    errss << "Valid commands are: CFG, NODE, CA, QSY, TRUNK, LOG\n"
+    errss << "Valid commands are: CFG, NODE, CA, QSY, TRUNK, LOG, ANNOUNCE\n"
           << "Usage:\n"
           << "CFG <section> <tag> <value>\n"
           << "NODE BLOCK <callsign> <blocktime seconds>\n"
@@ -3130,6 +3579,7 @@ void Reflector::ctrlPtyDataReceived(const void *buf, size_t count)
           << "TRUNK RELOAD [<section>]\n"
           << "TRUNK STATUS [<section>]\n"
           << "LOG [SHOW|RESET|<sub>=<lvl>[,...]]\n"
+          << AnnounceManager::ptyUsage()
           << "\nEmpty CFG lists all configuration";
   }
 

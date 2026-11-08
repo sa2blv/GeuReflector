@@ -60,6 +60,7 @@ set(LIBS asynccpp asyncaudio asynccore svxmisc ${LIBS})
 # Build the executable
 set(REFLECTOR_SOURCES
   svxreflector.cpp Reflector.cpp ReflectorClient.cpp TGHandler.cpp TGMixer.cpp TrunkLink.cpp
+  AnnouncePlayer.cpp AnnounceManager.cpp
   TwinLink.cpp
   SatelliteLink.cpp SatelliteClient.cpp
   ReflectorTrunkManager.cpp ReflectorClientUdp.cpp ExternaConfigFetcher.cpp 

@@ -408,6 +408,18 @@ void ReflectorClient::udpMsgReceived(const ReflectorUdpMsg &header)
 
 void ReflectorClient::sendUdpMsg(const ReflectorUdpMsg &msg)
 {
+  if (m_announce_exclusive &&
+      ((msg.type() == MsgUdpAudio::TYPE) ||
+       (msg.type() == MsgUdpFlushSamples::TYPE)))
+  {
+    return;   // an announcement owns this client's audio stream right now
+  }
+  sendAnnounceUdpMsg(msg);
+} /* ReflectorClient::sendUdpMsg */
+
+
+void ReflectorClient::sendAnnounceUdpMsg(const ReflectorUdpMsg &msg)
+{
   if (remoteUdpPort() == 0)
   {
     return;
@@ -416,7 +428,7 @@ void ReflectorClient::sendUdpMsg(const ReflectorUdpMsg &msg)
   m_udp_heartbeat_tx_cnt = UDP_HEARTBEAT_TX_CNT_RESET;
 
   (void)m_reflector->sendUdpDatagram(this, msg);
-} /* ReflectorClient::sendUdpMsg */
+} /* ReflectorClient::sendAnnounceUdpMsg */
 
 
 void ReflectorClient::setBlock(unsigned blocktime)

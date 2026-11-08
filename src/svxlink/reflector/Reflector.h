@@ -95,6 +95,8 @@ class ReflectorUdpMsg;
 class RedisStore;
 class TwinLink;
 class TGMixer;        // full-duplex per-TG conference mixer
+class AnnounceManager; // audio announcements (AnnounceManager.h)
+enum class AnnounceScope;
 struct MixResult;     // one mixed frame produced by a TGMixer
 
 
@@ -519,6 +521,8 @@ class Reflector : public sigc::trackable
     // One conference mixer per full-duplex TG (DUPLEX_MODE=full /
     // FULL_DUPLEX_TGS). Absent for half-duplex TGs -> zero overhead there.
     std::map<uint32_t, TGMixer*> m_tg_mixers;
+    // Audio announcements ([ANNOUNCE] section). nullptr when disabled.
+    AnnounceManager*             m_announce = nullptr;
     // Count of active LOCAL talkers per full-duplex TG, used to collapse the
     // local conference to a SINGLE talker-start/stop toward the mesh so an
     // old half-duplex peer sees exactly one remote talker (100% backward
@@ -661,6 +665,20 @@ class Reflector : public sigc::trackable
      *  exactly one remote talker. */
     void meshConferenceTalkerStart(uint32_t tg, const std::string& callsign);
     void meshConferenceTalkerStop(uint32_t tg);
+
+    // --- Audio announcements (AnnounceManager) ---
+    void initAnnounce(void);
+    bool announceTgBusy(uint32_t tg);
+    void onAnnounceTgStart(uint32_t tg, const std::string& cs, AnnounceScope scope);
+    void onAnnounceTgFrame(uint32_t tg, const std::vector<uint8_t>& frame,
+                           AnnounceScope scope);
+    void onAnnounceTgStop(uint32_t tg, const std::string& cs, AnnounceScope scope);
+    void onAnnounceNodeStart(uint32_t cid, uint32_t tg, const std::string& cs);
+    void onAnnounceNodeFrame(uint32_t cid, const std::vector<uint8_t>& frame);
+    void onAnnounceNodeStop(uint32_t cid, uint32_t tg, const std::string& cs);
+    void announceMeshTalkerStart(uint32_t tg, const std::string& cs);
+    void announceMeshAudio(uint32_t tg, const std::vector<uint8_t>& frame);
+    void announceMeshTalkerStop(uint32_t tg);
     void httpRequestReceived(Async::HttpServerConnection *con,
                              Async::HttpServerConnection::Request& req);
     void httpClientConnected(Async::HttpServerConnection *con);
