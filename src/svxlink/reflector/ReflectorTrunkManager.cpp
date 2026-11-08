@@ -686,6 +686,65 @@ void ReflectorTrunkManager::handleOutgoingAudio_width_remap_tg_send(int tg, MsgU
 
 
 
+// --- full-duplex TG: one mix-minus stream per trunk peer ---
+void ReflectorTrunkManager::handleOutgoingMix(int tg,
+    const std::vector<uint8_t>& full,
+    const std::map<std::string, std::vector<uint8_t>>& per_source,
+    const std::vector<uint8_t>& local_mix)
+{
+    for (auto& peer : peers)
+    {
+        if (!isTalkgroupAllowed(peer, tg))
+        {
+            continue;
+        }
+
+        const std::vector<uint8_t>* audio = nullptr;
+        if (peer.Retransmitt == 1)
+        {
+            // Everything in the conference except this peer's own audio.
+            auto it = per_source.find("u:" + peer.host);
+            if ((it == per_source.end()) && !peer.Bacup_host.empty())
+            {
+                it = per_source.find("u:" + peer.Bacup_host);
+            }
+            audio = (it != per_source.end()) ? &it->second : &full;
+        }
+        else
+        {
+            // No relaying to this peer: only our own local talkers.
+            audio = &local_mix;
+        }
+        if (audio->empty())
+        {
+            continue;
+        }
+
+        MsgUdpAudio_trunk msg_trunk;
+        msg_trunk.audioData() = *audio;
+        msg_trunk.tg = (peer.Use_tg_translation == true)
+            ? find_remap_dest_from_tg(peer.Translation, tg) : tg;
+
+        ReflectorUdpMsgV2 header(msg_trunk.type(), 0, 0 & 0xffff);
+        ostringstream ss;
+        // Not inside assert(): with NDEBUG the packing would be compiled out.
+        if (!header.pack(ss) || !msg_trunk.pack(ss) || !peer.client)
+        {
+            continue;
+        }
+
+        if (peer.Crypt_key != "")
+        {
+            peer.client->sendUdp_crypt(ss.str().data(), ss.str().size(), peer.Crypt_key);
+        }
+        else
+        {
+            peer.client->sendUdp(ss.str().data(), ss.str().size());
+        }
+    }
+}
+
+
 // --- send incomming audio to all trunk peers ---
 void ReflectorTrunkManager::handleOutgoingMessage_width_remap(int tg, MSG_Trunk_Change& msg_trunk)
 {
