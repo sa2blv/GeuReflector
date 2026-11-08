@@ -531,19 +531,18 @@ void TGMixer::onTick(Async::Timer*)
   result.full = m_cur_full;
   result.local_mix = m_cur_local;
 
-  // 3) Per active source: encode full mix minus its own audio. Cap the
-  //    number of personalised encodes; overflow sources get the full mix.
-  unsigned produced = 0;
+  // 3) Per active source: encode the full mix minus its own audio. Like
+  //    Asterisk softmix (bridge_softmix.c), EVERY source that contributed
+  //    audio this frame gets its personalised mix-minus-self -- there is no
+  //    talker cap. A cap would hand the overflow talkers the raw full mix,
+  //    i.e. their own audio back = echo. Only genuine passive listeners
+  //    (active_hangover == 0, no audio of their own in the mix) get `full`.
   for (auto& kv : m_sources)
   {
     Source* src = kv.second;
     if (src->active_hangover == 0)
     {
-      continue; // passive listener -> gets full mix
-    }
-    if (produced >= m_max_talkers)
-    {
-      break;
+      continue; // passive listener -> gets full mix (no own audio to remove)
     }
     if (src->encoder == nullptr)
     {
@@ -588,7 +587,6 @@ void TGMixer::onTick(Async::Timer*)
     {
       result.per_source[kv.first] = src->cur_out;
     }
-    produced++;
   }
 
   mixReady(result);
