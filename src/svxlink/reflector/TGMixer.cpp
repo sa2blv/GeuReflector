@@ -175,6 +175,15 @@ TGMixer::TGMixer(uint32_t tg, const Async::Config& cfg)
   unsigned vox_permille = cfgUnsigned(cfg, tg, "MIX_VOX_LEVEL", 3, 0, 1000);
   m_vox_level = static_cast<float>(vox_permille) / 1000.0f;
 
+  // How long a local source must be observed transmitting-while-hearing-others
+  // before we treat it as full duplex (pure on-air learning, no node info).
+  // A short sustain so a brief PTT-edge overlap does not misclassify a simplex
+  // node. Default 200 ms.
+  unsigned duplex_observe_ms =
+      cfgUnsigned(cfg, tg, "MIX_DUPLEX_OBSERVE_MS", 200, 0, 5000);
+  m_duplex_observe_frames = (duplex_observe_ms + m_frame_ms - 1) / m_frame_ms;
+  if (m_duplex_observe_frames == 0) { m_duplex_observe_frames = 1; }
+
   m_full_encoder = makeEncoder();
   if (m_full_encoder != nullptr)
   {
@@ -373,6 +382,7 @@ void TGMixer::onTick(Async::Timer*)
   for (auto& kv : m_sources)
   {
     Source* src = kv.second;
+    src->voiced_now = false; // set true below if it delivers real audio now
 
     // Respect the prebuffer before a source starts contributing.
     if (src->prebuffering)
@@ -410,6 +420,7 @@ void TGMixer::onTick(Async::Timer*)
     // noise, ungated bridge) does not hold the TG as a permanent talker.
     // m_vox_level == 0 disables the gate (voiced == has_audio).
     const bool voiced = has_audio && (peak >= m_vox_level);
+    src->voiced_now = voiced;
     if (avail < m_frame_size)
     {
       // Short/empty frame. Tolerate transient jitter: the tail of `pcm` is
@@ -556,6 +567,7 @@ void TGMixer::onTick(Async::Timer*)
   //    talker cap. A cap would hand the overflow talkers the raw full mix,
   //    i.e. their own audio back = echo. Only genuine passive listeners
   //    (active_hangover == 0, no audio of their own in the mix) get `full`.
+  std::vector<std::string> fd_hits; // local sources newly proven full duplex
   for (auto& kv : m_sources)
   {
     Source* src = kv.second;
@@ -600,6 +612,37 @@ void TGMixer::onTick(Async::Timer*)
         }
       }
     }
+
+    // On-air full-duplex learning (no node info): this source is itself an
+    // active talker THIS frame (voiced_now) and `minus` -- exactly what it
+    // would hear, with its own and same-callsign audio already removed -- is
+    // audible. Sustained past the observe window, that proves it transmits and
+    // receives at once => full duplex. A simplex node never reaches this (it
+    // cannot deliver audio while receiving), and a brief PTT-edge overlap is
+    // filtered by the sustain. Announced once; the reflector then stops gating
+    // this node's RX while it transmits.
+    if (src->is_local && src->voiced_now && !src->fd_announced)
+    {
+      float mpk = 0.0f;
+      for (unsigned i = 0; i < m_frame_size; ++i)
+      {
+        float a = (minus[i] < 0.0f) ? -minus[i] : minus[i];
+        if (a > mpk) { mpk = a; }
+      }
+      if (mpk >= m_vox_level)
+      {
+        if (++src->fd_run >= m_duplex_observe_frames)
+        {
+          src->fd_announced = true;
+          fd_hits.push_back(kv.first);
+        }
+      }
+      else
+      {
+        src->fd_run = 0; // require SUSTAINED overlap, ignore edge glitches
+      }
+    }
+
     src->cur_out.clear();
     src->encoder->writeSamples(minus.data(), static_cast<int>(m_frame_size));
     if (!src->cur_out.empty())
@@ -607,6 +650,10 @@ void TGMixer::onTick(Async::Timer*)
       result.per_source[kv.first] = src->cur_out;
     }
   }
+
+  // Announce any newly-learned full-duplex sources (after the loop so the slot
+  // handlers cannot disturb the iteration over m_sources).
+  for (const auto& id : fd_hits) { sourceFullDuplex(m_tg, id); }
 
   mixReady(result);
 } /* TGMixer::onTick */

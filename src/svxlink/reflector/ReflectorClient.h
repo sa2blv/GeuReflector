@@ -541,13 +541,16 @@ class ReflectorClient : public sigc::trackable
     void setFdxTalkerTG(uint32_t tg) { m_fdx_talker_tg = tg; updateIsTalker(); }
     uint32_t fdxTalkerTG(void) const { return m_fdx_talker_tg; }
 
-    /** True when the node reports the same RX and TX frequency, i.e. a simplex
-     *  (half-duplex) node that cannot receive while it transmits. Derived once
-     *  from the node info (handleNodeInfo), never per audio frame. Default
-     *  false: a node we cannot classify is treated as full-duplex (gets the
-     *  mix-minus-self stream as usual), so classification only ever ADDS the
-     *  "silent while transmitting" behaviour for confirmed simplex nodes. */
-    bool isSimplex(void) const { return m_is_simplex; }
+    /** True once this node has been OBSERVED transmitting while there was other
+     *  audio for it to receive on the same TG, i.e. a genuine full-duplex node.
+     *  Learned purely from on-air behaviour by the TG mixer (never from node
+     *  info, which can be wrong/misleading). Default false = treat as simplex
+     *  (half duplex): a node gets NOTHING while it transmits until it proves it
+     *  can do both at once. Harmless for a real full-duplex node — while it
+     *  transmits alone there is nothing to hear anyway; the first genuine
+     *  talk-over flips it (sticky for the connection). */
+    bool isFullDuplex(void) const { return m_is_full_duplex; }
+    void setFullDuplexObserved(void) { m_is_full_duplex = true; }
 
     uint32_t udpCipherIVCntrNext() { return m_udp_cipher_iv_cntr++; }
     std::vector<uint8_t> udpCipherIV(void) const;
@@ -616,7 +619,7 @@ class ReflectorClient : public sigc::trackable
     std::vector<std::string>    m_supported_codecs;
     uint32_t                    m_current_tg;
     uint32_t                    m_fdx_talker_tg = 0;
-    bool                        m_is_simplex = false;
+    bool                        m_is_full_duplex = false; // learned on-air (TGMixer)
     std::set<uint32_t>          m_monitored_tgs;
     JsonRxMap                   m_json_rx_map;
     JsonTxMap                   m_json_tx_map;

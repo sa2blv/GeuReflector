@@ -2019,6 +2019,7 @@ TGMixer* Reflector::getOrCreateMixer(uint32_t tg)
   TGMixer* mx = new TGMixer(tg, *m_cfg);
   mx->mixReady.connect(mem_fun(*this, &Reflector::onMixReady));
   mx->sourceActivity.connect(mem_fun(*this, &Reflector::onSourceActivity));
+  mx->sourceFullDuplex.connect(mem_fun(*this, &Reflector::onSourceFullDuplex));
   m_tg_mixers[tg] = mx;
   return mx;
 } /* Reflector::getOrCreateMixer */
@@ -2228,15 +2229,16 @@ void Reflector::onMixReady(const MixResult& result)
   {
     const bool is_talking = (result.tg != 0) && (c->fdxTalkerTG() == result.tg);
 
-    // Simplex (half-duplex) node WHILE IT TRANSMITS: it shares one frequency
-    // for RX and TX, so it cannot receive while it transmits. svxref therefore
-    // sends it NOTHING at all -- not its own audio, not other nodes' audio. It
-    // starts receiving the conference again the instant it stops transmitting
-    // (is_talking clears). Full-duplex nodes (RX!=TX, or unclassified) keep
-    // getting the live mix-minus-self and so hear others while they talk. This
-    // is the node-duplex distinction the operator asked for: only full-duplex
-    // nodes RX+TX at once; a simplex node is pure half duplex (tx/rx gated).
-    if (is_talking && c->isSimplex())
+    // A node that has NOT (yet) proven it can do full duplex is treated as
+    // simplex (half duplex) WHILE IT TRANSMITS: it may share one frequency for
+    // RX and TX, so svxref sends it NOTHING at all while it talks -- not its own
+    // audio, not other nodes' audio. It starts receiving the conference again
+    // the instant it stops transmitting (is_talking clears). A node that HAS
+    // been observed transmitting while there was other audio to hear (learned
+    // on-air by the TG mixer, never from node info) keeps getting the live
+    // mix-minus-self and so hears others while it talks. Only a genuine
+    // full-duplex node RX+TX at once; everything else is gated tx/rx.
+    if (is_talking && !c->isFullDuplex())
     {
       continue;
     }
@@ -2407,6 +2409,37 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
     meshConferenceTalkerStop(tg);
   }
 } /* Reflector::onSourceActivity */
+
+
+void Reflector::onSourceFullDuplex(uint32_t tg, const std::string& id)
+{
+  // The TG mixer observed this LOCAL source transmitting while it had other
+  // audio to hear -> it is genuinely full duplex. Mark the client so onMixReady
+  // keeps feeding it mix-minus-self while it transmits (sticky for the
+  // connection). Learned purely on-air; node info is never consulted.
+  if (id.rfind("c:", 0) != 0)
+  {
+    return;
+  }
+  ReflectorClient* client = nullptr;
+  try
+  {
+    ReflectorClient::ClientId cid =
+        static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
+    client = ReflectorClient::lookup(cid);
+  }
+  catch (...)
+  {
+    client = nullptr;
+  }
+  if ((client != nullptr) && !client->isFullDuplex())
+  {
+    client->setFullDuplexObserved();
+    geulog::info("client", "[", client->callsign(),
+                 "]: duplex learned as FULL DUPLEX (TX while RX on TG #",
+                 tg, ")");
+  }
+} /* Reflector::onSourceFullDuplex */
 
 
 void Reflector::meshConferenceTalkerStart(uint32_t tg,

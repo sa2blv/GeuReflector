@@ -176,6 +176,19 @@ class TGMixer : public sigc::trackable
     sigc::signal<void(uint32_t, const std::string&, const std::string&, bool)>
         sourceActivity;
 
+    /**
+     * @brief   Emitted when a LOCAL source is first observed to be full duplex.
+     * @param   tg This mixer's talk group
+     * @param   id The source id ("c:<clientId>")
+     *
+     * Fires once, the first time a local source delivers its own audio while
+     * there is OTHER audible audio for it to receive on the TG (i.e. it is
+     * transmitting AND receiving at once), sustained past a short debounce.
+     * The reflector uses it to mark the client full duplex so it keeps getting
+     * mix-minus-self while it transmits. Pure on-air learning — no node info.
+     */
+    sigc::signal<void(uint32_t, const std::string&)> sourceFullDuplex;
+
   private:
     static const unsigned SAMPLE_RATE = INTERNAL_SAMPLE_RATE;
 
@@ -194,6 +207,9 @@ class TGMixer : public sigc::trackable
       unsigned              active_hangover = 0; // frames since last audio
       unsigned              idle_frames = 0;   // consecutive fully-idle frames
       unsigned              underrun_frames = 0; // consecutive short/empty frames
+      bool                  voiced_now = false; // delivered real audio THIS frame
+      unsigned              fd_run = 0;        // consecutive frames heard-while-talking
+      bool                  fd_announced = false; // full-duplex already signalled
       std::vector<uint8_t>  cur_out;           // encoder output this frame
     };
 
@@ -207,6 +223,7 @@ class TGMixer : public sigc::trackable
     unsigned                          m_reprebuf_frames; // sustained underrun -> rebuild jitter
     unsigned                          m_source_timeout_frames; // idle->prune
     float                             m_vox_level;       // activity level gate (peak, 0..1)
+    unsigned                          m_duplex_observe_frames; // heard-while-talking frames -> full duplex
     std::map<std::string, Source*>    m_sources;
     Async::AudioEncoder*              m_full_encoder = nullptr;
     Async::AudioEncoder*              m_local_encoder = nullptr;
