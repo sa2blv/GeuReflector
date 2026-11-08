@@ -1061,6 +1061,10 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
     {
       //std::cout << "### Found qth" << std::endl;
       Json::Value& qths(status["qth"]);
+      // Collect RX and TX frequencies to classify the node's duplex type: a
+      // node whose RX and TX share a frequency is simplex (half duplex) and
+      // cannot receive while it transmits. Done once here, never per frame.
+      std::vector<double> rx_freqs, tx_freqs;
       for (Json::Value::ArrayIndex i=0; i<qths.size(); ++i)
       {
         Json::Value& qth(qths[i]);
@@ -1081,6 +1085,10 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
                 setRxEnabled(rx_id, false);
                 setRxSqlOpen(rx_id, false);
                 setRxActive(rx_id, false);
+                if (rx.isMember("freq") && rx["freq"].isNumeric())
+                {
+                  rx_freqs.push_back(rx["freq"].asDouble());
+                }
               }
             }
           }
@@ -1099,10 +1107,37 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
               {
                 m_json_tx_map.emplace(tx_id, tx);
                 setTxTransmit(tx_id, false);
+                if (tx.isMember("freq") && tx["freq"].isNumeric())
+                {
+                  tx_freqs.push_back(tx["freq"].asDouble());
+                }
               }
             }
           }
         }
+      }
+      // Simplex iff an RX and a TX frequency coincide (same radio in/out).
+      // Only CONFIRMED simplex flips the flag; a node that reports no usable
+      // freqs stays full-duplex (default) so we never withhold audio from a
+      // node we could not classify. 1 kHz tolerance for float noise.
+      bool simplex = false;
+      for (double rxf : rx_freqs)
+      {
+        for (double txf : tx_freqs)
+        {
+          const double diff = rxf - txf;
+          if ((rxf > 0.0) && (txf > 0.0) && (diff < 0.001) && (diff > -0.001))
+          {
+            simplex = true;
+          }
+        }
+      }
+      if (simplex != m_is_simplex)
+      {
+        m_is_simplex = simplex;
+        geulog::info("client", "[", m_callsign, "]: duplex classified as ",
+                     (simplex ? "SIMPLEX (half duplex, RX==TX)"
+                              : "full/duplex (RX!=TX)"));
       }
     }
   }

@@ -541,6 +541,14 @@ class ReflectorClient : public sigc::trackable
     void setFdxTalkerTG(uint32_t tg) { m_fdx_talker_tg = tg; updateIsTalker(); }
     uint32_t fdxTalkerTG(void) const { return m_fdx_talker_tg; }
 
+    /** True when the node reports the same RX and TX frequency, i.e. a simplex
+     *  (half-duplex) node that cannot receive while it transmits. Derived once
+     *  from the node info (handleNodeInfo), never per audio frame. Default
+     *  false: a node we cannot classify is treated as full-duplex (gets the
+     *  mix-minus-self stream as usual), so classification only ever ADDS the
+     *  "silent while transmitting" behaviour for confirmed simplex nodes. */
+    bool isSimplex(void) const { return m_is_simplex; }
+
     uint32_t udpCipherIVCntrNext() { return m_udp_cipher_iv_cntr++; }
     std::vector<uint8_t> udpCipherIV(void) const;
 
@@ -608,6 +616,7 @@ class ReflectorClient : public sigc::trackable
     std::vector<std::string>    m_supported_codecs;
     uint32_t                    m_current_tg;
     uint32_t                    m_fdx_talker_tg = 0;
+    bool                        m_is_simplex = false;
     std::set<uint32_t>          m_monitored_tgs;
     JsonRxMap                   m_json_rx_map;
     JsonTxMap                   m_json_tx_map;

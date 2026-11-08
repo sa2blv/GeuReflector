@@ -2226,6 +2226,21 @@ void Reflector::onMixReady(const MixResult& result)
       TGHandler::instance()->clientsForTG(result.tg);
   for (ReflectorClient* c : clients)
   {
+    const bool is_talking = (result.tg != 0) && (c->fdxTalkerTG() == result.tg);
+
+    // Simplex (half-duplex) node WHILE IT TRANSMITS: it shares one frequency
+    // for RX and TX, so it cannot receive while it transmits. svxref therefore
+    // sends it NOTHING at all -- not its own audio, not other nodes' audio. It
+    // starts receiving the conference again the instant it stops transmitting
+    // (is_talking clears). Full-duplex nodes (RX!=TX, or unclassified) keep
+    // getting the live mix-minus-self and so hear others while they talk. This
+    // is the node-duplex distinction the operator asked for: only full-duplex
+    // nodes RX+TX at once; a simplex node is pure half duplex (tx/rx gated).
+    if (is_talking && c->isSimplex())
+    {
+      continue;
+    }
+
     const std::string id = "c:" + std::to_string(c->clientId());
     auto pit = result.per_source.find(id);
     if (pit != result.per_source.end())
@@ -2238,16 +2253,14 @@ void Reflector::onMixReady(const MixResult& result)
         c->sendUdpMsg(m);
       }
     }
-    else if ((result.tg != 0) && (c->fdxTalkerTG() == result.tg))
+    else if (is_talking)
     {
-      // This node is CURRENTLY TRANSMITTING on this TG but produced no
-      // per-source mix-minus-self this frame (talker-cap overflow, or a
-      // brief idle/jitter window where its source went passive). It must
-      // NEVER be handed result.full: the full mix contains this node's own
-      // audio, so sending it is exactly the "I hear myself the whole time I
-      // transmit" echo. Asterisk ConfBridge invariant: a contributor only
-      // ever receives the conference minus its own audio, never the raw mix.
-      // Send nothing this frame instead of the full mix.
+      // Full-duplex node CURRENTLY TRANSMITTING but with no per-source mix-
+      // minus-self this frame (brief idle/jitter window). It must NEVER be
+      // handed result.full: the full mix contains this node's own audio, so
+      // sending it is exactly the "I hear myself while I transmit" echo.
+      // Asterisk ConfBridge invariant: a contributor only ever receives the
+      // conference minus its own audio, never the raw mix. Send nothing.
     }
     else if (!result.full.empty())
     {
