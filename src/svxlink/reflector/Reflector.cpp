@@ -2335,10 +2335,12 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
     // Per-talker start toward LOCAL clients (dashboards/TCL show each one).
     broadcastMsg(MsgTalkerStart(tg, callsign),
         ReflectorClient::mkAndFilter(
-          ge_v2_client_filter,
-          ReflectorClient::mkOrFilter(
-            ReflectorClient::TgFilter(tg),
-            ReflectorClient::TgMonitorFilter(tg))));
+          ReflectorClient::ExceptFilter(client), // never send a talker its own start
+          ReflectorClient::mkAndFilter(
+            ge_v2_client_filter,
+            ReflectorClient::mkOrFilter(
+              ReflectorClient::TgFilter(tg),
+              ReflectorClient::TgMonitorFilter(tg)))));
     if (tg == tgForV1Clients())
     {
       broadcastMsg(MsgTalkerStartV1(callsign), v1_client_filter);
@@ -2358,10 +2360,12 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
     }
     broadcastMsg(MsgTalkerStop(tg, callsign),
         ReflectorClient::mkAndFilter(
-          ge_v2_client_filter,
-          ReflectorClient::mkOrFilter(
-            ReflectorClient::TgFilter(tg),
-            ReflectorClient::TgMonitorFilter(tg))));
+          ReflectorClient::ExceptFilter(client), // never send a talker its own stop
+          ReflectorClient::mkAndFilter(
+            ge_v2_client_filter,
+            ReflectorClient::mkOrFilter(
+              ReflectorClient::TgFilter(tg),
+              ReflectorClient::TgMonitorFilter(tg)))));
     if (tg == tgForV1Clients())
     {
       broadcastMsg(MsgTalkerStopV1(callsign), v1_client_filter);
