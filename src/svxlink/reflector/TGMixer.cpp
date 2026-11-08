@@ -151,6 +151,16 @@ TGMixer::TGMixer(uint32_t tg, const Async::Config& cfg)
   {
     m_prebuf_size = m_frame_size;
   }
+  // RESUME cushion after a mid-over gap: much smaller than the initial
+  // prebuffer so audio comes back almost immediately instead of leaving a full
+  // MIX_JITTER_MS (default 60 ms) silent hole. Only the first start uses the
+  // full prebuffer; a resume just needs enough not to instantly re-underrun.
+  // Default 20 ms (one frame); clamped to [1 frame, m_prebuf_size].
+  unsigned reprebuf_target_ms =
+      cfgUnsigned(cfg, tg, "MIX_REPREBUF_TARGET_MS", 20, 0, 500);
+  m_reprebuf_target = (SAMPLE_RATE * reprebuf_target_ms) / 1000;
+  if (m_reprebuf_target < m_frame_size) { m_reprebuf_target = m_frame_size; }
+  if (m_reprebuf_target > m_prebuf_size) { m_reprebuf_target = m_prebuf_size; }
   // Hangover: keep a source "active" past its last audio so brief gaps between
   // packets do not flap the talker-start/stop or the mix-minus-self routing.
   // Configurable; default raised to 500 ms so a steady but jittery source
@@ -279,6 +289,7 @@ void TGMixer::addSource(const std::string& id, bool local,
         });
   }
   src->prebuffering    = (m_prebuf_size > 0);
+  src->prebuf_target   = m_prebuf_size; // full cushion for the initial start
   src->active_hangover = 0;
 
   m_sources[id] = src;
@@ -408,7 +419,7 @@ void TGMixer::onTick(Async::Timer*)
     // Respect the prebuffer before a source starts contributing.
     if (src->prebuffering)
     {
-      if (src->ring.size() >= m_prebuf_size)
+      if (src->ring.size() >= src->prebuf_target)
       {
         src->prebuffering = false;
       }
@@ -454,6 +465,7 @@ void TGMixer::onTick(Async::Timer*)
       if ((m_prebuf_size > 0) && (src->underrun_frames >= m_reprebuf_frames))
       {
         src->prebuffering = true;
+        src->prebuf_target = m_reprebuf_target; // resume fast, no 60 ms hole
         src->underrun_frames = 0;
       }
     }

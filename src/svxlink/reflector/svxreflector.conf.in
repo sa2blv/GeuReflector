@@ -83,6 +83,11 @@ TG_FOR_V1_CLIENTS=999
 # silence) after this long of a SUSTAINED outage, not on every late/partial
 # frame. Higher = more jitter absorbed before a gap is heard. Default 300 ms.
 #MIX_REPREBUF_MS=300
+# MIX_REPREBUF_TARGET_MS: when a mid-over gap does force a rebuild, how much to
+# re-buffer before RESUMING. Small (default 20 ms = 1 frame) so audio returns
+# almost immediately instead of leaving a full MIX_JITTER_MS silent hole; only
+# the very first start uses the full MIX_JITTER_MS cushion.
+#MIX_REPREBUF_TARGET_MS=20
 #
 #HTTP_SRV_PORT=8080
 COMMAND_PTY=/dev/shm/reflector_ctrl

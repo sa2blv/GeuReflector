@@ -212,6 +212,7 @@ class TGMixer : public sigc::trackable
       Async::AudioEncoder*  encoder = nullptr; // for mix-minus-self
       std::deque<float>     ring;              // jitter buffer (PCM)
       bool                  prebuffering = true;
+      size_t                prebuf_target = 0; // samples to buffer before (re)starting
       bool                  is_local = true;   // local client vs mesh source
       std::string           callsign;          // for talker-start/stop
       bool                  announced_active = false; // start/stop debounce
@@ -237,7 +238,8 @@ class TGMixer : public sigc::trackable
     unsigned                          m_jitter_ms;
     unsigned                          m_max_talkers;
     unsigned                          m_frame_size;    // samples per frame
-    unsigned                          m_prebuf_size;   // samples before play
+    unsigned                          m_prebuf_size;   // samples before INITIAL play
+    unsigned                          m_reprebuf_target; // samples before RESUME after a gap
     unsigned                          m_hangover_frames;
     unsigned                          m_talker_hang_frames; // TalkerStop debounce (>= hangover)
     unsigned                          m_reprebuf_frames; // sustained underrun -> rebuild jitter
