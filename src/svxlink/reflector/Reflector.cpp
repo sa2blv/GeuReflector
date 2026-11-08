@@ -2321,6 +2321,10 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   if (active)
   {
     if (client != nullptr) { client->setFdxTalkerTG(tg); }
+
+	      std::cout << callsign << ": Talker start on TG #" << tg
+              << " (full duplex)" << std::endl;
+	  
     // Per-talker start toward LOCAL clients (dashboards/TCL show each one).
     broadcastMsg(MsgTalkerStart(tg, callsign),
         ReflectorClient::mkAndFilter(
@@ -2341,6 +2345,8 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   {
     if ((client != nullptr) && (client->fdxTalkerTG() == tg))
     {
+	  std::cout << callsign << ": Talker stop on TG #" << tg
+              << " (full duplex)" << std::endl;
       client->setFdxTalkerTG(0);
     }
     broadcastMsg(MsgTalkerStop(tg, callsign),
