@@ -2230,14 +2230,28 @@ void Reflector::onMixReady(const MixResult& result)
     auto pit = result.per_source.find(id);
     if (pit != result.per_source.end())
     {
+      // Active source -> its personalised mix-minus-self (others' audio only,
+      // never its own). Empty == only-talker frame -> send nothing.
       if (!pit->second.empty())
       {
         MsgUdpAudio m(pit->second);
         c->sendUdpMsg(m);
       }
     }
+    else if ((result.tg != 0) && (c->fdxTalkerTG() == result.tg))
+    {
+      // This node is CURRENTLY TRANSMITTING on this TG but produced no
+      // per-source mix-minus-self this frame (talker-cap overflow, or a
+      // brief idle/jitter window where its source went passive). It must
+      // NEVER be handed result.full: the full mix contains this node's own
+      // audio, so sending it is exactly the "I hear myself the whole time I
+      // transmit" echo. Asterisk ConfBridge invariant: a contributor only
+      // ever receives the conference minus its own audio, never the raw mix.
+      // Send nothing this frame instead of the full mix.
+    }
     else if (!result.full.empty())
     {
+      // Genuine passive listener (not transmitting): the full conference mix.
       MsgUdpAudio m(result.full);
       c->sendUdpMsg(m);
     }
