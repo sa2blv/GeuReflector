@@ -508,6 +508,10 @@ bool Reflector::initialize(Async::Config &cfg)
   TGHandler::instance()->setSqlTimeoutBlocktime(sql_timeout_blocktime);
 
   m_cfg->getValue("GLOBAL", "TG_FOR_V1_CLIENTS", m_tg_for_v1_clients);
+  // Anti-echo tail: how long a simplex node stays RX-gated after it last fed
+  // audio on a full-duplex TG, so its delayed (often relabelled) trunk loop-back
+  // never plays out on PTT release. Decoupled from TalkerStop. Default 1500 ms.
+  m_cfg->getValue("GLOBAL", "FDX_SIMPLEX_RX_GATE_MS", m_fdx_simplex_rx_gate_ms);
 
   SvxLink::SepPair<uint32_t, uint32_t> random_qsy_range;
   if (m_cfg->getValue("GLOBAL", "RANDOM_QSY_RANGE", random_qsy_range))
@@ -1671,6 +1675,7 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
           if (TGHandler::instance()->fullDuplexForTG(tg))
           {
             const std::string fdx_id = "c:" + std::to_string(client->clientId());
+            client->markFdxTx(); // for the simplex RX-gate tail (anti-echo)
             TGMixer* mx = getOrCreateMixer(tg);
             if (mx != nullptr)
             {
@@ -2257,21 +2262,23 @@ void Reflector::onMixReady(const MixResult& result)
   // get the mix. The lone talker itself gets nothing either way.
   const TGHandler::ClientSet& clients =
       TGHandler::instance()->clientsForTG(result.tg);
+  const std::chrono::steady_clock::time_point fdx_now =
+      std::chrono::steady_clock::now();
   for (ReflectorClient* c : clients)
   {
     if (result.passthrough_clients) { break; }
     const bool is_talking = (result.tg != 0) && (c->fdxTalkerTG() == result.tg);
 
-    // A node that has NOT (yet) proven it can do full duplex is treated as
-    // simplex (half duplex) WHILE IT TRANSMITS: it may share one frequency for
-    // RX and TX, so svxref sends it NOTHING at all while it talks -- not its own
-    // audio, not other nodes' audio. It starts receiving the conference again
-    // the instant it stops transmitting (is_talking clears). A node that HAS
-    // been observed transmitting while there was other audio to hear (learned
-    // on-air by the TG mixer, never from node info) keeps getting the live
-    // mix-minus-self and so hears others while it talks. Only a genuine
-    // full-duplex node RX+TX at once; everything else is gated tx/rx.
-    if (is_talking && !c->isFullDuplex())
+    // A SIMPLEX (non-full-duplex) node is RX-gated while it transmits AND for a
+    // short window after. While transmitting it shares one frequency so it
+    // cannot receive at all. The window AFTER is the anti-echo tail: its own
+    // audio loops back over a trunk/bridge with a delay and is often RELABELLED
+    // to another callsign, so the callsign-based drop misses it; without the
+    // window it would play out the instant the node releases PTT. The window is
+    // decoupled from TalkerStop (which stays short, so the radio unkeys
+    // promptly). A genuine full-duplex node is never gated -- it RX+TX at once.
+    if (!c->isFullDuplex() &&
+        (is_talking || (c->fdxTxAgeMs(fdx_now) < (long) m_fdx_simplex_rx_gate_ms)))
     {
       continue;
     }
@@ -2303,6 +2310,22 @@ void Reflector::onMixReady(const MixResult& result)
       MsgUdpAudio m(result.full);
       c->sendUdpMsg(m);
     }
+  }
+
+  // --- Monitors: clients whose SELECTED TG is elsewhere but that MONITOR this
+  //     TG get the full conference mix. The member loop above only serves
+  //     clientsForTG() (selected-TG members), so without this a monitored
+  //     full-duplex TG is silent for the monitor (monitor_tg "doesn't work").
+  //     Excluded: members of this TG (already served, would double up). Works
+  //     in passthrough mode too, where result.full is the sole talker's raw
+  //     Opus. ---
+  if (!result.full.empty())
+  {
+    MsgUdpAudio mon(result.full);
+    broadcastUdpMsg(mon,
+        ReflectorClient::mkAndFilter(
+          ReflectorClient::TgMonitorFilter(result.tg),
+          ReflectorClient::mkNotFilter(ReflectorClient::TgFilter(result.tg))));
   }
 
   // --- Satellites are downstream-local: like clients they get the FULL mix
@@ -2444,68 +2467,25 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
 } /* Reflector::onSourceActivity */
 
 
-void Reflector::onSourceFullDuplex(uint32_t tg, const std::string& id)
+void Reflector::onSourceFullDuplex(uint32_t /*tg*/, const std::string& /*id*/)
 {
-  // The TG mixer observed this LOCAL source transmitting while it had other
-  // audio to hear -> it is genuinely full duplex. Mark the client so onMixReady
-  // keeps feeding it mix-minus-self while it transmits (sticky for the
-  // connection). Learned purely on-air; node info is never consulted.
-  if (id.rfind("c:", 0) != 0)
-  {
-    return;
-  }
-  ReflectorClient* client = nullptr;
-  try
-  {
-    ReflectorClient::ClientId cid =
-        static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
-    client = ReflectorClient::lookup(cid);
-  }
-  catch (...)
-  {
-    client = nullptr;
-  }
-  if (client != nullptr)
-  {
-    // Set the sticky behavioural flag (wins over any freq hint and over a later
-    // simplex observation). The mixer emits this once per source, so logging
-    // here is not spammy.
-    client->setFullDuplexObserved();
-    geulog::info("client", "[", client->callsign(),
-                 "]: duplex learned as FULL DUPLEX (TX while RX on TG #",
-                 tg, ")");
-  }
+  // DISABLED: full duplex is never inferred from behaviour. "Transmitting while
+  // others are active" cannot be told apart from a simplex node simply doubling
+  // over someone, so promoting on it would stream audio back to a simplex node
+  // while it keys -> echo on PTT release. Full duplex comes ONLY from node info
+  // (freq RX!=TX, no-radio app, or nodeClass repeater/bridge); see
+  // ReflectorClient::handleNodeInfo / isFullDuplex.
 } /* Reflector::onSourceFullDuplex */
 
 
 void Reflector::onSourceSimplex(uint32_t tg, const std::string& id)
 {
-  // The TG mixer observed this LOCAL source taking turns (active, but never at
-  // the same time as others) -> it is half duplex. Override a wrong "full" freq
-  // hint. A later genuine talk-over still upgrades it to full (that wins).
-  if (id.rfind("c:", 0) != 0)
-  {
-    return;
-  }
-  ReflectorClient* client = nullptr;
-  try
-  {
-    ReflectorClient::ClientId cid =
-        static_cast<ReflectorClient::ClientId>(std::stoul(id.substr(2)));
-    client = ReflectorClient::lookup(cid);
-  }
-  catch (...)
-  {
-    client = nullptr;
-  }
-  if ((client != nullptr) && client->isFullDuplex() &&
-      (client->duplexHint() == ReflectorClient::DuplexHint::Full))
-  {
-    client->setSimplexObserved();
-    geulog::info("client", "[", client->callsign(),
-                 "]: duplex corrected to SIMPLEX (take-turns on TG #", tg,
-                 "; freq hint was wrong)");
-  }
+  // DISABLED: duplex is classified from node info only (see onSourceFullDuplex).
+  // "Take-turns" is just as ambiguous (a full-duplex node that happens to talk
+  // politely looks half duplex), so we do not demote a real full node from it
+  // either. Kept as a no-op so the mixer signal has a harmless sink.
+  (void) tg;
+  (void) id;
 } /* Reflector::onSourceSimplex */
 
 

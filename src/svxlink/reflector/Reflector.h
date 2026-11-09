@@ -524,6 +524,7 @@ class Reflector : public sigc::trackable
     // old half-duplex peer sees exactly one remote talker (100% backward
     // compatible) and never flaps.
     std::map<uint32_t, int>      m_fdx_mesh_talkers;
+    unsigned                     m_fdx_simplex_rx_gate_ms = 1500; // anti-echo tail
     // Current talker callsign per (LOCAL tg, trunk source address), learned
     // from the trunk TalkerStart (the type-101 audio frames carry no callsign
     // of their own on every bridge). Keyed per source so two trunks talking

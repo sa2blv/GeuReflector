@@ -77,8 +77,15 @@ TG_FOR_V1_CLIENTS=999
 # past the last voiced frame, SEPARATE from and >= MIX_HANGOVER_MS. A continuous
 # over has natural gaps (jitter, breaths, soft syllables); holding the talker
 # across them gives ONE clean Start..Stop per over instead of a flap that clips
-# word endings and trips "last talker audio timeout" downstream. Default 1500 ms.
+# word endings and trips "last talker audio timeout" downstream. Applies to
+# MESH/trunk sources (jittery). Default 1500 ms.
 #MIX_TALKER_HANG_MS=1500
+# MIX_TALKER_HANG_LOCAL_MS: the same, for LOCAL clients (a radio or app with a
+# clean packet stream). Kept short so a physical radio releases promptly on
+# TalkerStop instead of staying keyed ~1.5 s after the audio ends ("seg").
+# Talker state tracks raw packet arrival, so TalkerStart is immediate (no
+# jitter-prebuffer delay). Default 300 ms.
+#MIX_TALKER_HANG_LOCAL_MS=300
 # MIX_REPREBUF_MS: only rebuild the jitter buffer (which injects a prebuffer of
 # silence) after this long of a SUSTAINED outage, not on every late/partial
 # frame. Higher = more jitter absorbed before a gap is heard. Default 300 ms.

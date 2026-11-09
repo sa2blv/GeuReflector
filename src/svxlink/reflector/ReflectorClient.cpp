@@ -1058,7 +1058,8 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
     setMonitoredTGs(m_monitored_tgs);
     setTg(m_current_tg);
     bool any_pair = false, simplex_pair = false; // from qth rx/tx freq (below)
-    if (status.isMember("qth") && status["qth"].isArray())
+    bool has_radios = false;                      // node reported any RX/TX radio
+    if (status.isMember("qth") && status["qth"].isArray() && !status["qth"].empty())
     {
       //std::cout << "### Found qth" << std::endl;
       Json::Value& qths(status["qth"]);
@@ -1134,19 +1135,31 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
       }
     }
 
-    // Duplex HINT (advisory only; the TG mixer confirms/overrides it from
-    // behaviour in either direction). Two node-info signals, both operator-
-    // written and possibly wrong:
-    //   1) qth RX/TX frequency: same => simplex, different => full (concrete
-    //      radio evidence, preferred when present).
-    //   2) nodeClass string: repeater/bridge => full, simplex/hotspot =>
-    //      simplex (used when no usable freq pair).
+    has_radios = !m_json_rx_map.empty() || !m_json_tx_map.empty();
+
+    // Duplex classification from node info, physically grounded (NOT from
+    // behaviour -- "transmitting while others are active" cannot be told apart
+    // from a simplex node doubling, which would echo back to it on PTT release):
+    //   1) qth RX/TX frequency: SAME => simplex (one radio, cannot RX while TX),
+    //      DIFFERENT => full duplex (separate RX/TX = a repeater). Authoritative.
+    //   2) No RF radios at all (qth null/empty) => a software app/bridge (e.g.
+    //      the DV desktop client), which is inherently full duplex.
+    //   3) Otherwise nodeClass: repeater/bridge => full, simplex/hotspot =>
+    //      simplex.
+    // A simplex node is gated (NOTHING while it transmits) so it never echoes; a
+    // full node gets mix-minus-self and hears others while it talks. Both can
+    // share one TG: the simplex node just does its half of it.
     DuplexHint h = DuplexHint::Unknown;
     const char* hsrc = "";
     if (any_pair)
     {
       h = simplex_pair ? DuplexHint::Simplex : DuplexHint::Full;
       hsrc = "freq";
+    }
+    else if (!has_radios)
+    {
+      h = DuplexHint::Full;      // no RF radios -> app/bridge -> full duplex
+      hsrc = "no-radio (app)";
     }
     else if (status.isMember("nodeClass") && status["nodeClass"].isString())
     {
@@ -1159,9 +1172,8 @@ void ReflectorClient::handleNodeInfo(std::istream& is)
     if ((h != DuplexHint::Unknown) && (h != m_duplex_hint))
     {
       m_duplex_hint = h;
-      geulog::info("client", "[", m_callsign, "]: duplex HINT from ", hsrc, " = ",
-                   (h == DuplexHint::Simplex ? "simplex" : "full"),
-                   " (advisory; behaviour overrides)");
+      geulog::info("client", "[", m_callsign, "]: duplex classified from ", hsrc,
+                   " = ", (h == DuplexHint::Simplex ? "simplex" : "full"));
     }
   }
   catch (const Json::Exception& e)

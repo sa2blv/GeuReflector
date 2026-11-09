@@ -235,16 +235,18 @@ class TGMixer : public sigc::trackable
       unsigned              talker_hangover = 0; // frames of TALKER state left (longer)
       unsigned              idle_frames = 0;   // consecutive fully-idle frames
       unsigned              underrun_frames = 0; // consecutive short/empty frames
-      bool                  voiced_now = false; // delivered real audio THIS frame
-      unsigned              fd_run = 0;        // consecutive frames heard-while-talking
+      bool                  audio_now = false; // carrier open THIS frame (COR: it streamed)
+      unsigned              fd_run = 0;        // consecutive frames active-while-others-active
       bool                  fd_announced = false; // full-duplex already signalled
       // Half-duplex (take-turns) detection window: both this source and others
       // were active within the window but never in the SAME frame => simplex.
       unsigned              dg_frames = 0;     // frames counted in this window
-      unsigned              dg_self = 0;       // frames this source was voiced
-      unsigned              dg_other = 0;      // frames others were audible
+      unsigned              dg_self = 0;       // frames this source had carrier
+      unsigned              dg_other = 0;      // frames others had carrier
       unsigned              dg_overlap = 0;    // frames both at once
       bool                  simplex_announced = false; // simplex already signalled
+      bool                  got_packet = false; // a packet arrived since last tick
+      std::vector<uint8_t>  last_opus;         // most recent raw Opus (for passthrough)
       std::vector<uint8_t>  cur_out;           // encoder output this frame
     };
 
@@ -256,17 +258,18 @@ class TGMixer : public sigc::trackable
     unsigned                          m_prebuf_size;   // samples before INITIAL play
     unsigned                          m_reprebuf_target; // samples before RESUME after a gap
     unsigned                          m_hangover_frames;
-    unsigned                          m_talker_hang_frames; // TalkerStop debounce (>= hangover)
+    unsigned                          m_talker_hang_frames;       // mesh/trunk TalkerStop debounce
+    unsigned                          m_talker_hang_local_frames; // local client (radio/app) debounce
     unsigned                          m_active_count = 0;   // sources talking now
     bool                              m_single_local = false; // the sole talker is a local client
     unsigned                          m_reprebuf_frames; // sustained underrun -> rebuild jitter
     unsigned                          m_source_timeout_frames; // idle->prune
-    float                             m_vox_level;       // activity level gate (peak, 0..1)
     unsigned                          m_duplex_observe_frames; // heard-while-talking frames -> full duplex
     unsigned                          m_duplex_window_frames;  // take-turns detection window length
     std::map<std::string, Source*>    m_sources;
     Async::AudioEncoder*              m_full_encoder = nullptr;
     Async::AudioEncoder*              m_local_encoder = nullptr;
+    bool                              m_mixing = false; // 2+ talkers: encoders live
     std::vector<uint8_t>              m_cur_full;      // full-mix enc output
     std::vector<uint8_t>              m_cur_local;     // local-mix enc output
     Async::Timer                      m_tick_timer;
@@ -275,6 +278,9 @@ class TGMixer : public sigc::trackable
     TGMixer& operator=(const TGMixer&);
 
     Async::AudioEncoder* makeEncoder(void);
+    void ensureSourceEncoder(Source* src); // lazily create a source's mix encoder
+    void ensureMixEncoders(void);          // lazily create the full/local encoders
+    void dropEncoders(void);               // free all encoders when mixing stops
     void destroySource(Source* src);
     void onTick(Async::Timer*);
     void setTickEnabled(bool enable);
