@@ -35,6 +35,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  ****************************************************************************/
 
 #include <string>
+#include <chrono>
 #include <json/json.h>
 #include <sigc++/sigc++.h>
 #include <random>
@@ -287,6 +288,25 @@ class ReflectorClient : public sigc::trackable
     static OrFilter<F1, F2> mkOrFilter(const F1& f1, const F2& f2)
     {
       return OrFilter<F1, F2>(f1, f2);
+    }
+
+    template <class F>
+    class NotFilter : public Filter
+    {
+      public:
+        NotFilter(const F& f) : m_f(f) {}
+        virtual bool operator ()(ReflectorClient *client) const
+        {
+          return !m_f(client);
+        }
+      private:
+        F m_f;
+    };
+
+    template <class F>
+    static NotFilter<F> mkNotFilter(const F& f)
+    {
+      return NotFilter<F>(f);
     }
 
     /**
@@ -557,6 +577,51 @@ class ReflectorClient : public sigc::trackable
     void setFdxTalkerTG(uint32_t tg) { m_fdx_talker_tg = tg; updateIsTalker(); }
     uint32_t fdxTalkerTG(void) const { return m_fdx_talker_tg; }
 
+    /** Mark that this client just fed audio on a full-duplex TG, and how long
+     *  ago that was. A SIMPLEX node must stay RX-gated not only WHILE it
+     *  transmits but for a short window AFTER, because its own audio loops back
+     *  over a trunk/bridge with a delay (often RELABELLED to another callsign,
+     *  so the callsign-based drop misses it) and would otherwise play out as an
+     *  echo the instant it releases PTT. This window is decoupled from the
+     *  TalkerStop timing, so the radio still unkeys promptly. */
+    void markFdxTx(void)
+    {
+      m_last_fdx_tx = std::chrono::steady_clock::now();
+    }
+    long fdxTxAgeMs(std::chrono::steady_clock::time_point now) const
+    {
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+                 now - m_last_fdx_tx).count();
+    }
+
+    /** Initial duplex guess from the node-info RX/TX frequency: same freq =>
+     *  simplex (half duplex), different => full duplex. Only a HINT: the file is
+     *  operator-written and may be wrong, so on-air behaviour (TG mixer) can and
+     *  does override it in either direction. Unknown when no usable freq. */
+    enum class DuplexHint { Unknown, Simplex, Full };
+    void setDuplexHint(DuplexHint h) { m_duplex_hint = h; }
+    DuplexHint duplexHint(void) const { return m_duplex_hint; }
+
+    /** Effective duplex classification used to gate RX while transmitting.
+     *  FULL DUPLEX IS NEVER DERIVED FROM BEHAVIOUR. "Transmitting while others
+     *  are active" cannot be distinguished from a simplex node simply doubling
+     *  over someone, so any behavioural promotion risks streaming audio back to
+     *  a genuinely simplex node while it transmits -> echo on PTT release. So:
+     *    - full comes ONLY from the node-info hint (freq RX!=TX, or nodeClass
+     *      repeater/bridge),
+     *    - behaviour may only DOWNGRADE a (possibly wrong) Full hint to simplex
+     *      when it observes clean take-turns (safe: never causes echo),
+     *    - everything else defaults to simplex (gated: NOTHING while it TX).
+     *  A simplex node thus never gets its own or others' audio while keyed. */
+    bool isFullDuplex(void) const
+    {
+      return m_duplex_hint == DuplexHint::Full;     // full only from node info
+    }
+    void setSimplexObserved(void)
+    {
+      if (!m_fd_confirmed_full) { m_fd_confirmed_simplex = true; }
+    }
+
     uint32_t udpCipherIVCntrNext() { return m_udp_cipher_iv_cntr++; }
     std::vector<uint8_t> udpCipherIV(void) const;
 
@@ -625,6 +690,10 @@ class ReflectorClient : public sigc::trackable
     std::vector<std::string>    m_supported_codecs;
     uint32_t                    m_current_tg;
     uint32_t                    m_fdx_talker_tg = 0;
+    std::chrono::steady_clock::time_point m_last_fdx_tx{}; // last audio fed (fdx)
+    DuplexHint                  m_duplex_hint = DuplexHint::Unknown; // freq hint
+    bool                        m_fd_confirmed_full = false;    // learned on-air
+    bool                        m_fd_confirmed_simplex = false;  // learned on-air
     std::set<uint32_t>          m_monitored_tgs;
     JsonRxMap                   m_json_rx_map;
     JsonTxMap                   m_json_tx_map;

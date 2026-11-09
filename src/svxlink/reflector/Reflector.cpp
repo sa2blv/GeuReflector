@@ -513,6 +513,10 @@ bool Reflector::initialize(Async::Config &cfg)
   TGHandler::instance()->setSqlTimeoutBlocktime(sql_timeout_blocktime);
 
   m_cfg->getValue("GLOBAL", "TG_FOR_V1_CLIENTS", m_tg_for_v1_clients);
+  // Anti-echo tail: how long a simplex node stays RX-gated after it last fed
+  // audio on a full-duplex TG, so its delayed (often relabelled) trunk loop-back
+  // never plays out on PTT release. Decoupled from TalkerStop. Default 1500 ms.
+  m_cfg->getValue("GLOBAL", "FDX_SIMPLEX_RX_GATE_MS", m_fdx_simplex_rx_gate_ms);
 
   SvxLink::SepPair<uint32_t, uint32_t> random_qsy_range;
   if (m_cfg->getValue("GLOBAL", "RANDOM_QSY_RANGE", random_qsy_range))
@@ -1717,11 +1721,36 @@ void Reflector::udpDatagramReceived(const IpAddress& addr, uint16_t port,
           if (TGHandler::instance()->fullDuplexForTG(tg))
           {
             const std::string fdx_id = "c:" + std::to_string(client->clientId());
+            client->markFdxTx(); // for the simplex RX-gate tail (anti-echo)
             TGMixer* mx = getOrCreateMixer(tg);
             if (mx != nullptr)
             {
               mx->writeOpus(fdx_id, msg.audioData(), /*local=*/true,
                             client->callsign());
+
+              // Single-talker passthrough (A): when this is the only talker on
+              // the TG, forward its raw Opus straight to the other clients -- no
+              // decode/jitter/mix/encode, so zero added latency and no transcode
+              // loss. The mixer still runs (for talker state and the 2+-talker
+              // case), and onMixReady skips its client loop while this holds
+              // (result.passthrough_clients), so clients are not sent the stream
+              // twice. Mesh links still get the mixer's local_mix in onMixReady,
+              // so they are NOT forwarded here. As soon as a second talker joins,
+              // activeCount() >= 2 and the mix path takes over.
+              //
+              // Recipients are exactly onMixReady's: iterate clientsForTG() and
+              // send per client (minus the talker), so the set matches the mix
+              // path precisely -- no listener gained or lost at the switch.
+              if (mx->activeCount() <= 1)
+              {
+                for (ReflectorClient* c :
+                       TGHandler::instance()->clientsForTG(tg))
+                {
+                  if (c == client) { continue; } // never echo to the talker
+                  MsgUdpAudio out(msg.audioData());
+                  c->sendUdpMsg(out);
+                }
+              }
             }
           }
           else
@@ -2067,6 +2096,8 @@ TGMixer* Reflector::getOrCreateMixer(uint32_t tg)
   TGMixer* mx = new TGMixer(tg, *m_cfg);
   mx->mixReady.connect(mem_fun(*this, &Reflector::onMixReady));
   mx->sourceActivity.connect(mem_fun(*this, &Reflector::onSourceActivity));
+  mx->sourceFullDuplex.connect(mem_fun(*this, &Reflector::onSourceFullDuplex));
+  mx->sourceSimplex.connect(mem_fun(*this, &Reflector::onSourceSimplex));
   m_tg_mixers[tg] = mx;
   return mx;
 } /* Reflector::getOrCreateMixer */
@@ -2270,25 +2301,79 @@ void Reflector::onMixReady(const MixResult& result)
   // --- Local clients: mix-minus-self to active sources, full mix to the
   //     rest. A single Opus stream per client (never two) so node decoders
   //     stay in sync. ---
+  //
+  // Single-talker passthrough: when exactly one LOCAL client is talking, the
+  // Reflector has already forwarded its raw Opus straight to the other clients
+  // (zero added latency, no transcode) in handleMsgUdpAudio. Re-sending the
+  // mixer's (re-encoded, jitter-buffered) copy here would both duplicate it and
+  // add latency, so skip the client loop in that case. Mesh links below still
+  // get the mix. The lone talker itself gets nothing either way.
   const TGHandler::ClientSet& clients =
       TGHandler::instance()->clientsForTG(result.tg);
+  const std::chrono::steady_clock::time_point fdx_now =
+      std::chrono::steady_clock::now();
   for (ReflectorClient* c : clients)
   {
+    if (result.passthrough_clients) { break; }
+    const bool is_talking = (result.tg != 0) && (c->fdxTalkerTG() == result.tg);
+
+    // A SIMPLEX (non-full-duplex) node is RX-gated while it transmits AND for a
+    // short window after. While transmitting it shares one frequency so it
+    // cannot receive at all. The window AFTER is the anti-echo tail: its own
+    // audio loops back over a trunk/bridge with a delay and is often RELABELLED
+    // to another callsign, so the callsign-based drop misses it; without the
+    // window it would play out the instant the node releases PTT. The window is
+    // decoupled from TalkerStop (which stays short, so the radio unkeys
+    // promptly). A genuine full-duplex node is never gated -- it RX+TX at once.
+    if (!c->isFullDuplex() &&
+        (is_talking || (c->fdxTxAgeMs(fdx_now) < (long) m_fdx_simplex_rx_gate_ms)))
+    {
+      continue;
+    }
+
     const std::string id = "c:" + std::to_string(c->clientId());
     auto pit = result.per_source.find(id);
     if (pit != result.per_source.end())
     {
+      // Active source -> its personalised mix-minus-self (others' audio only,
+      // never its own). Empty == only-talker frame -> send nothing.
       if (!pit->second.empty())
       {
         MsgUdpAudio m(pit->second);
         c->sendUdpMsg(m);
       }
     }
+    else if (is_talking)
+    {
+      // Full-duplex node CURRENTLY TRANSMITTING but with no per-source mix-
+      // minus-self this frame (brief idle/jitter window). It must NEVER be
+      // handed result.full: the full mix contains this node's own audio, so
+      // sending it is exactly the "I hear myself while I transmit" echo.
+      // Asterisk ConfBridge invariant: a contributor only ever receives the
+      // conference minus its own audio, never the raw mix. Send nothing.
+    }
     else if (!result.full.empty())
     {
+      // Genuine passive listener (not transmitting): the full conference mix.
       MsgUdpAudio m(result.full);
       c->sendUdpMsg(m);
     }
+  }
+
+  // --- Monitors: clients whose SELECTED TG is elsewhere but that MONITOR this
+  //     TG get the full conference mix. The member loop above only serves
+  //     clientsForTG() (selected-TG members), so without this a monitored
+  //     full-duplex TG is silent for the monitor (monitor_tg "doesn't work").
+  //     Excluded: members of this TG (already served, would double up). Works
+  //     in passthrough mode too, where result.full is the sole talker's raw
+  //     Opus. ---
+  if (!result.full.empty())
+  {
+    MsgUdpAudio mon(result.full);
+    broadcastUdpMsg(mon,
+        ReflectorClient::mkAndFilter(
+          ReflectorClient::TgMonitorFilter(result.tg),
+          ReflectorClient::mkNotFilter(ReflectorClient::TgFilter(result.tg))));
   }
 
   // --- Satellites are downstream-local: like clients they get the FULL mix
@@ -2377,9 +2462,11 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   {
     if (client != nullptr) { client->setFdxTalkerTG(tg); }
 
-	      std::cout << callsign << ": Talker start on TG #" << tg
-              << " (full duplex)" << std::endl;
-	  
+    // Log exactly like the half-duplex path so svxdr's log tailer (which
+    // anchors its regex on "... on TG #<n>$" and strips [info] [client]
+    // tags) records the talker into lastheard. A trailing " (full duplex)"
+    // suffix breaks that regex -> local talkers never reach lastheard.
+    geulog::info("client", callsign, ": Talker start on TG #", tg);
     // Per-talker start toward LOCAL clients (dashboards/TCL show each one).
     broadcastMsg(MsgTalkerStart(tg, callsign),
         ReflectorClient::mkAndFilter(
@@ -2400,10 +2487,13 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
   }
   else
   {
+    // Unconditional, like the start above and the half-duplex path: svxdr
+    // pairs each logged start with its stop to compute the lastheard
+    // duration, so the stop must be logged even if the client has already
+    // gone. Clearing the talker flag still needs a live client.
+    geulog::info("client", callsign, ": Talker stop on TG #", tg);
     if ((client != nullptr) && (client->fdxTalkerTG() == tg))
     {
-	  std::cout << callsign << ": Talker stop on TG #" << tg
-              << " (full duplex)" << std::endl;
       client->setFdxTalkerTG(0);
     }
     broadcastMsg(MsgTalkerStop(tg, callsign),
@@ -2423,6 +2513,28 @@ void Reflector::onSourceActivity(uint32_t tg, const std::string& id,
     meshConferenceTalkerStop(tg);
   }
 } /* Reflector::onSourceActivity */
+
+
+void Reflector::onSourceFullDuplex(uint32_t /*tg*/, const std::string& /*id*/)
+{
+  // DISABLED: full duplex is never inferred from behaviour. "Transmitting while
+  // others are active" cannot be told apart from a simplex node simply doubling
+  // over someone, so promoting on it would stream audio back to a simplex node
+  // while it keys -> echo on PTT release. Full duplex comes ONLY from node info
+  // (freq RX!=TX, no-radio app, or nodeClass repeater/bridge); see
+  // ReflectorClient::handleNodeInfo / isFullDuplex.
+} /* Reflector::onSourceFullDuplex */
+
+
+void Reflector::onSourceSimplex(uint32_t tg, const std::string& id)
+{
+  // DISABLED: duplex is classified from node info only (see onSourceFullDuplex).
+  // "Take-turns" is just as ambiguous (a full-duplex node that happens to talk
+  // politely looks half duplex), so we do not demote a real full node from it
+  // either. Kept as a no-op so the mixer signal has a harmless sink.
+  (void) tg;
+  (void) id;
+} /* Reflector::onSourceSimplex */
 
 
 void Reflector::meshConferenceTalkerStart(uint32_t tg,

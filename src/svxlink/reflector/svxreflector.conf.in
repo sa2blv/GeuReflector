@@ -71,14 +71,32 @@ TG_FOR_V1_CLIENTS=999
 #MIX_JITTER_MS=60
 #MIX_MAX_TALKERS=4
 #MIX_SOURCE_TIMEOUT_MS=10000
-# MIX_HANGOVER_MS: how long a source stays "active" (talker-start held) past its
-# last audio. Default 500 ms. Prevents TalkerStop/Start flapping on a steady but
-# jittery source (trunk/bridge, or an uneven node) whose packets arrive unevenly.
+# MIX_HANGOVER_MS: how long a source keeps contributing to the mix past its last
+# audio (mix fade-out). Default 500 ms. Kept short so a silence gap adds no
+# latency for other listeners.
 #MIX_HANGOVER_MS=500
+# MIX_TALKER_HANG_MS: how long the TALKER state (TalkerStart..TalkerStop) is held
+# past the last voiced frame, SEPARATE from and >= MIX_HANGOVER_MS. A continuous
+# over has natural gaps (jitter, breaths, soft syllables); holding the talker
+# across them gives ONE clean Start..Stop per over instead of a flap that clips
+# word endings and trips "last talker audio timeout" downstream. Applies to
+# MESH/trunk sources (jittery). Default 1500 ms.
+#MIX_TALKER_HANG_MS=1500
+# MIX_TALKER_HANG_LOCAL_MS: the same, for LOCAL clients (a radio or app with a
+# clean packet stream). Kept short so a physical radio releases promptly on
+# TalkerStop instead of staying keyed ~1.5 s after the audio ends ("seg").
+# Talker state tracks raw packet arrival, so TalkerStart is immediate (no
+# jitter-prebuffer delay). Default 300 ms.
+#MIX_TALKER_HANG_LOCAL_MS=300
 # MIX_REPREBUF_MS: only rebuild the jitter buffer (which injects a prebuffer of
 # silence) after this long of a SUSTAINED outage, not on every late/partial
 # frame. Higher = more jitter absorbed before a gap is heard. Default 300 ms.
 #MIX_REPREBUF_MS=300
+# MIX_REPREBUF_TARGET_MS: when a mid-over gap does force a rebuild, how much to
+# re-buffer before RESUMING. Small (default 20 ms = 1 frame) so audio returns
+# almost immediately instead of leaving a full MIX_JITTER_MS silent hole; only
+# the very first start uses the full MIX_JITTER_MS cushion.
+#MIX_REPREBUF_TARGET_MS=20
 #
 #HTTP_SRV_PORT=8080
 COMMAND_PTY=/dev/shm/reflector_ctrl

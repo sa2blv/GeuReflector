@@ -531,6 +531,7 @@ class Reflector : public sigc::trackable
     // old half-duplex peer sees exactly one remote talker (100% backward
     // compatible) and never flaps.
     std::map<uint32_t, int>      m_fdx_mesh_talkers;
+    unsigned                     m_fdx_simplex_rx_gate_ms = 1500; // anti-echo tail
     // Current talker callsign per (LOCAL tg, trunk source address), learned
     // from the trunk TalkerStart (the type-101 audio frames carry no callsign
     // of their own on every bridge). Keyed per source so two trunks talking
@@ -659,6 +660,12 @@ class Reflector : public sigc::trackable
      *  mesh via meshConferenceTalkerStart/Stop. */
     void onSourceActivity(uint32_t tg, const std::string& id,
                           const std::string& callsign, bool active);
+    /** A local source was observed to be full duplex (TX while RX); mark the
+     *  client so its RX is no longer gated while it transmits. */
+    void onSourceFullDuplex(uint32_t tg, const std::string& id);
+    /** A local source was observed to be half duplex (take-turns); override a
+     *  wrong "full" freq hint back to simplex. */
+    void onSourceSimplex(uint32_t tg, const std::string& id);
     /** Drop a client from every mixer (on disconnect); tear down an empty
      *  mixer. */
     void removeFromAllMixers(ReflectorClient* client);
