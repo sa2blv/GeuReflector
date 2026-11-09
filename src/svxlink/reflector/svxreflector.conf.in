@@ -11,9 +11,11 @@ LISTEN_PORT=5300
 #SQL_TIMEOUT=600
 #SQL_TIMEOUT_BLOCKTIME=60
 #CODECS=OPUS
+# Audio announcements: name of the announce section (see [ANNOUNCE] below)
+#ANNOUNCE=ANNOUNCE
 TG_FOR_V1_CLIENTS=999
 #LOCAL_PREFIX=1
-# LOCAL_ALIASES — re-home short local TGs under an owned prefix so they are
+# LOCAL_ALIASES â€” re-home short local TGs under an owned prefix so they are
 # reachable internationally by their globally-unique number.  Comma-separated
 # entries "localTG:aliasTG[/dir]"; dir is "in" or "out" (omitted = two-way).
 # The aliasTG MUST fall under a LOCAL_PREFIX or the entry is rejected at load.
@@ -203,7 +205,7 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #PORT=5302
 #SECRET=change_this_shared_secret
 #REMOTE_PREFIX=2
-# Optional PEER_ID — name advertised to the peer in the trunk hello
+# Optional PEER_ID â€” name advertised to the peer in the trunk hello
 # (defaults to section name). The peer uses it as the MQTT topic
 # component for this link, so set it to a stable, broker-friendly name.
 #PEER_ID=reflector-a
@@ -229,13 +231,13 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #ROUTABLE_PREFIXES=*          # regional leaf default route via this uplink
 
 ###############################################################################
-# Twin (HA-pair) link — see docs/TWIN_PROTOCOL.md
+# Twin (HA-pair) link â€” see docs/TWIN_PROTOCOL.md
 ###############################################################################
 # Uncomment to pair this reflector with a partner that shares its LOCAL_PREFIX.
 # Both reflectors declare an IDENTICAL LOCAL_PREFIX and a [TWIN] section
 # pointing at each other.  Clients can connect to either node and external
 # trunk peers see the pair as a single logical peer (with PAIRED=1 on their
-# side — see below).
+# side â€” see below).
 #
 #[TWIN]
 #HOST=ref2.example.de
@@ -246,7 +248,7 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #TWIN_LISTEN_PORT=5304
 
 ###############################################################################
-# Paired external trunk — consume a remote HA-pair as a single logical peer
+# Paired external trunk â€” consume a remote HA-pair as a single logical peer
 ###############################################################################
 # When the remote side is a twin pair (two reflectors with the same
 # LOCAL_PREFIX linked via [TWIN]), set PAIRED=1 and list both their hosts
@@ -294,7 +296,7 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #SATELLITE_PORT=5303
 #SATELLITE_SECRET=change_this_satellite_secret
 #SATELLITE_ID=my-satellite
-# Optional TG filter — restricts which TGs this satellite cares about.
+# Optional TG filter â€” restricts which TGs this satellite cares about.
 # Applied in both directions: the satellite skips sending local events for
 # non-matching TGs, and advertises the filter to the parent via
 # MsgPeerFilter (type 122) so the parent skips forwarding them back.
@@ -303,12 +305,12 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #SATELLITE_FILTER=24*,262*
 
 #
-# MQTT publishing. Optional — omit this section to disable.
+# MQTT publishing. Optional â€” omit this section to disable.
 # Publishes real-time events (talker, client, trunk state) and periodic
 # full status to an external MQTT broker.
 #
 # All fields except TLS and STATUS_INTERVAL are required when this
-# section is present. TOPIC_PREFIX has no default — set it to a unique
+# section is present. TOPIC_PREFIX has no default â€” set it to a unique
 # identifier for this reflector (e.g. svxreflector/myreflector).
 #
 #[MQTT]
@@ -317,13 +319,13 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #USERNAME=reflector
 #PASSWORD=secret
 #TOPIC_PREFIX=svxreflector/myreflector
-# Optional MQTT_NAME — appended as a path component, so topics become
-# <TOPIC_PREFIX>/<MQTT_NAME>/... — useful when several reflectors share
+# Optional MQTT_NAME â€” appended as a path component, so topics become
+# <TOPIC_PREFIX>/<MQTT_NAME>/... â€” useful when several reflectors share
 # the same TOPIC_PREFIX. Leave unset to keep topics flat.
 #MQTT_NAME=reflector-01
 # Periodic full-status publish interval in milliseconds (default 30000).
 # The full snapshot is a bootstrap/drift-correction tool for new MQTT
-# subscribers — per-event topics already deliver every change live.
+# subscribers â€” per-event topics already deliver every change live.
 # Lower this only if you have a small mesh and a consumer that depends
 # on near-real-time full snapshots; at hundreds of nodes the retained
 # payload is hundreds of KB and republishing it once per second is
@@ -335,7 +337,7 @@ CERT_CA_HOOK=@SVX_SHARE_INSTALL_DIR@/ca-hook.py
 #TLS_CLIENT_KEY=/path/to/client.key
 
 #
-# Redis-backed config store. Optional — omit this section to use the
+# Redis-backed config store. Optional â€” omit this section to use the
 # config-file-only behavior. When this section is present, [USERS],
 # [PASSWORDS], CLUSTER_TGS, and per-trunk BLACKLIST_TGS / ALLOW_TGS /
 # TG_MAP / mute lists are read from Redis instead of this file. Use
@@ -396,4 +398,47 @@ TrunkTypeSend=B
 #TgMapFile=/etc/svxlink/tg_mapping.csv
 Key= #Cypto key
 
-
+#
+# Audio announcements. Optional, enabled by GLOBAL/ANNOUNCE=ANNOUNCE.
+# Clips: 16-bit PCM WAV, best 16 kHz mono, e.g.
+#   ffmpeg -i in.mp3 -ac 1 -ar 16000 -sample_fmt s16 info.wav
+# PTY: ANNOUNCE PLAY TG <tg> <file> [LOCAL|TRUNK|BOTH]
+#      ANNOUNCE PLAY NODE <callsign> <file>
+#      ANNOUNCE STOP TG <tg> | STOP NODE <callsign> | STOP ALL
+#      ANNOUNCE SCOPE <tg> <LOCAL|TRUNK|BOTH|DEFAULT>
+#      ANNOUNCE LIST
+#
+#[ANNOUNCE]
+#DIR=/etc/svxlink/announce
+#CALLSIGN=INFO
+#TO_MESH=0                   # 0/LOCAL, 1/BOTH or TRUNK
+# Feedback clips are played on every attempt, at most FEEDBACK_MAX_REPEAT
+# times per FEEDBACK_WINDOW seconds per node and kind. The count restarts
+# when the node changes TG. Per kind: <KIND>_MAX / <KIND>_WINDOW, where
+# KIND is QSY_BLOCKED, QSY_DISABLED, NODE_BLOCKED or ON_TALK.
+#FEEDBACK_MAX_REPEAT=5       # 0 = no cap
+#FEEDBACK_WINDOW=300         # sliding window in s (old name FEEDBACK_RESET)
+#FEEDBACK_MIN_INTERVAL=0     # s between two feedback clips, 0 = no limit
+#ON_TALK_QSY_DELAY_MS=500    # quiet time before ANNOUNCE_ON_TALK_QSY
+#NODE_IDLE_MS=500
+#NODE_MAX_WAIT=5
+#TG_MAX_WAIT=60
+#MAX_QUEUE=5
+#MAX_LENGTH=120
+#GAIN_DB=0
+#QSY_BLOCKED_CLIP=qsy_blocked
+#QSY_DISABLED_CLIP=qsy_disabled
+#NODE_BLOCKED_CLIP=blocked
+#
+# Per TG: [TG#<tg>] ANNOUNCE_TO_MESH, ANNOUNCE_CALLSIGN,
+#         ANNOUNCE_QSY_BLOCKED_CLIP, ANNOUNCE_QSY_DISABLED_CLIP,
+#         ANNOUNCE_NODE_BLOCKED_CLIP, ANNOUNCE_<KIND>_MAX/_WINDOW
+#
+# Info / help TG: talking on it plays a clip back to that node only
+# (after PTT release; a new PTT press while it plays stops it).
+#[TG#9990]
+#ANNOUNCE_ON_TALK_CLIP=help
+#ANNOUNCE_ON_TALK_PRIVATE=1  # the talker's audio is not forwarded at all
+#ANNOUNCE_ON_TALK_MAX=1      # play at most once ...
+#ANNOUNCE_ON_TALK_WINDOW=900 # ... per 15 minutes (reset on TG change)
+#ANNOUNCE_ON_TALK_QSY=0      # then QSY the node to this TG (unset = stay)

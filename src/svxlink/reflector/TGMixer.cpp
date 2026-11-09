@@ -341,6 +341,19 @@ void TGMixer::writeOpus(const std::string& id,
 } /* TGMixer::writeOpus */
 
 
+bool TGMixer::hasActiveSource(const std::string& except) const
+{
+  for (const auto& kv : m_sources)
+  {
+    if ((kv.first != except) && kv.second->announced_active)
+    {
+      return true;
+    }
+  }
+  return false;
+} /* TGMixer::hasActiveSource */
+
+
 /****************************************************************************
  *
  * Private member functions

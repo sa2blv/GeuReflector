@@ -157,6 +157,15 @@ class TGMixer : public sigc::trackable
     unsigned activeCount(void) const { return m_active_count; }
 
     /**
+     * @brief   Is any source currently producing audio?
+     * @param   except A source id to ignore (e.g. the caller's own source)
+     *
+     * Uses the same debounced activity as sourceActivity, so it is true
+     * from talker-start to talker-stop of any source on this TG.
+     */
+    bool hasActiveSource(const std::string& except = "") const;
+
+    /**
      * @brief   Feed one Opus packet from a source into the mix
      * @param   id    The source identity (auto-registered if unknown)
      * @param   opus  The raw Opus payload as received on the wire

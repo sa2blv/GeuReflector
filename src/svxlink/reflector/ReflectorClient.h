@@ -477,6 +477,22 @@ class ReflectorClient : public sigc::trackable
     void sendUdpMsg(const ReflectorUdpMsg &msg);
 
     /**
+     * @brief   Reserve the client's audio stream for an announcement
+     * @param   excl true while an announcement is played to this client
+     *
+     * While set, sendUdpMsg() drops MsgUdpAudio and MsgUdpFlushSamples so
+     * the client's single decoder never gets two interleaved streams. The
+     * announcement itself is sent with sendAnnounceUdpMsg().
+     */
+    void setAnnounceExclusive(bool excl) { m_announce_exclusive = excl; }
+    bool announceExclusive(void) const { return m_announce_exclusive; }
+
+    /**
+     * @brief   Send a UDP message, bypassing the announce exclusivity
+     */
+    void sendAnnounceUdpMsg(const ReflectorUdpMsg &msg);
+
+    /**
      * @brief   Block client audio for the specified time
      * @param   The number of seconds to block
      *
@@ -669,6 +685,7 @@ class ReflectorClient : public sigc::trackable
     Reflector*                  m_reflector;
     unsigned                    m_blocktime;
     unsigned                    m_remaining_blocktime;
+    bool                        m_announce_exclusive = false;
     ProtoVer                    m_client_proto_ver;
     std::vector<std::string>    m_supported_codecs;
     uint32_t                    m_current_tg;
